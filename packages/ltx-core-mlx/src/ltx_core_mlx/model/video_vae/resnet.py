@@ -48,6 +48,62 @@ class ResBlock3d(nn.Module):
         return x + residual
 
 
+class ResBlock3dAdapter(nn.Module):
+    """Channel-changing residual block — PrunaVAED's ``conv_in``.
+
+    Mirrors diffusers ``LTX2VideoResnetBlock3d`` in its ``in_channels != out_channels``
+    configuration: the main path is the usual PixelNorm -> SiLU -> Conv pair, but the
+    residual is routed through an *affine* LayerNorm over channels (``norm3``) and a
+    1x1x1 ``conv_shortcut``.
+
+    The stock LTX-2.3 decoder contains no such block — every stock ResBlock preserves its
+    channel count and every stock norm is parameterless PixelNorm — so ``norm3`` is the
+    only learned normalization anywhere in a pruned decoder. Pruna prunes *inside* each
+    block while keeping the wider skip between blocks, and this block is what reconciles
+    the two widths.
+
+    Forward: norm1 -> silu -> conv1 -> norm2 -> silu -> conv2  +  conv_shortcut(norm3(x))
+
+    Produces keys: ``conv1.conv.{weight,bias}``, ``conv2.conv.{weight,bias}``,
+    ``conv_shortcut.{weight,bias}``, ``norm3.{weight,bias}``
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        eps: float = 1e-6,
+        causal: bool = True,
+        spatial_padding_mode: str = "zeros",
+    ):
+        super().__init__()
+        self.conv1 = Conv3dBlock(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            causal=causal,
+            spatial_padding_mode=spatial_padding_mode,
+        )
+        self.conv2 = Conv3dBlock(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            causal=causal,
+            spatial_padding_mode=spatial_padding_mode,
+        )
+        # Reference uses a plain nn.Conv3d here, not the causal-padding wrapper.
+        self.conv_shortcut = nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=True)
+        self.norm3 = nn.LayerNorm(in_channels, eps=eps, affine=True)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        h = self.conv1(nn.silu(pixel_norm(x)))
+        h = self.conv2(nn.silu(pixel_norm(h)))
+        # norm3 normalizes over channels, which is already the last axis in BFHWC.
+        return h + self.conv_shortcut(self.norm3(x))
+
+
 class ResBlockStage(nn.Module):
     """A stage of N residual blocks at a fixed channel count.
 

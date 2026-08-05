@@ -9,6 +9,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from ltx_core_mlx.model.video_vae.convolution import Conv3dBlock
+from ltx_core_mlx.model.video_vae.resnet import ResBlock3dAdapter
 
 # ---------------------------------------------------------------------------
 # Pixel-shuffle / space-to-depth helpers
@@ -135,7 +136,13 @@ class DepthToSpaceUpsample(nn.Module):
     The conv may output more channels than the input (for pixel-shuffle
     spatial/temporal upsampling). The caller handles the rearrangement.
 
-    Produces key: ``conv.conv.{weight,bias}``
+    ``adapter_in_channels`` builds the optional channel-adapter block that pruned
+    decoders (PrunaVAED) place immediately before the upsample conv, matching the
+    diffusers up-block order ``conv_in -> upsampler -> resnets``. The stock LTX-2.3
+    decoder never has one.
+
+    Produces keys: ``conv.conv.{weight,bias}`` and, with an adapter,
+    ``conv_in.{conv1,conv2}.conv.*`` + ``conv_in.{conv_shortcut,norm3}.*``
     """
 
     def __init__(
@@ -144,8 +151,21 @@ class DepthToSpaceUpsample(nn.Module):
         out_channels: int,
         causal: bool = True,
         spatial_padding_mode: str = "zeros",
+        adapter_in_channels: int | None = None,
+        adapter_eps: float = 1e-6,
     ):
         super().__init__()
+        self.conv_in = (
+            None
+            if adapter_in_channels is None
+            else ResBlock3dAdapter(
+                adapter_in_channels,
+                in_channels,
+                eps=adapter_eps,
+                causal=causal,
+                spatial_padding_mode=spatial_padding_mode,
+            )
+        )
         self.conv = Conv3dBlock(
             in_channels,
             out_channels,
@@ -156,6 +176,8 @@ class DepthToSpaceUpsample(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> mx.array:
+        if self.conv_in is not None:
+            x = self.conv_in(x)
         return self.conv(x)
 
 

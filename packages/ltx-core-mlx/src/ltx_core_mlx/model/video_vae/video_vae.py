@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
@@ -137,6 +139,105 @@ def _group_tiles_by_temporal_slice(tiles: list[Tile]) -> list[list[Tile]]:
     return groups
 
 
+@dataclass(frozen=True)
+class DecoderLadder:
+    """Per-stage channel widths of the video decoder.
+
+    Widths are the *only* thing that differs between the stock LTX-2.3 decoder and a
+    pruned sibling such as PrunaVAED. The upsample geometry is deliberately NOT part of
+    the ladder: the (spatial, temporal) factors encode the VAE's 32x-spatial / 8x-temporal
+    compression contract, which positions, patchify and the whole frame-count math depend
+    on. A pruned variant changes widths, never geometry — and :meth:`validate` fails loudly
+    if a checkpoint ever claims otherwise.
+
+    Fields:
+        conv_in:    (latent_channels, first_width)
+        res_stages: (channels, num_blocks) for each even ``up_blocks`` index
+        upsamples:  (in_channels, conv_out_channels, adapter_in_channels|None) for each
+                    odd ``up_blocks`` index
+        conv_out:   (final_width, out_channels)
+    """
+
+    conv_in: tuple[int, int]
+    res_stages: tuple[tuple[int, int], ...]
+    upsamples: tuple[tuple[int, int, int | None], ...]
+    conv_out: tuple[int, int]
+
+    @classmethod
+    def stock(cls) -> DecoderLadder:
+        """The LTX-2.3 decoder shipped by Lightricks."""
+        return cls(
+            conv_in=(128, 1024),
+            res_stages=((1024, 2), (512, 2), (512, 4), (256, 6), (128, 4)),
+            upsamples=((1024, 4096, None), (512, 4096, None), (512, 512, None), (256, 512, None)),
+            conv_out=(128, 48),
+        )
+
+    @classmethod
+    def from_weights(cls, weights: Mapping[str, mx.array]) -> DecoderLadder:
+        """Infer the ladder from a loaded decoder weight dict (prefix already stripped).
+
+        Deriving from the tensors rather than a sidecar config keeps the checkpoint
+        self-describing, and keeps this loader identical in shape to the Swift port, which
+        only ever sees a flat weight dict.
+        """
+        idx = {int(m.group(1)) for k in weights if (m := re.match(r"up_blocks\.(\d+)\.", k))}
+        if not idx or sorted(idx) != list(range(len(idx))):
+            raise ValueError(f"up_blocks indices are not contiguous from 0: {sorted(idx)}")
+
+        res_stages: list[tuple[int, int]] = []
+        upsamples: list[tuple[int, int, int | None]] = []
+        for i in sorted(idx):
+            if i % 2 == 0:
+                blocks = {
+                    int(m.group(1)) for k in weights if (m := re.match(rf"up_blocks\.{i}\.res_blocks\.(\d+)\.", k))
+                }
+                if not blocks or sorted(blocks) != list(range(len(blocks))):
+                    raise ValueError(f"up_blocks.{i} res_blocks are not contiguous from 0: {sorted(blocks)}")
+                res_stages.append((weights[f"up_blocks.{i}.res_blocks.0.conv1.conv.weight"].shape[0], len(blocks)))
+            else:
+                w = weights[f"up_blocks.{i}.conv.conv.weight"]
+                adapter_key = f"up_blocks.{i}.conv_in.conv1.conv.weight"
+                adapter_in = weights[adapter_key].shape[-1] if adapter_key in weights else None
+                upsamples.append((int(w.shape[-1]), int(w.shape[0]), adapter_in))
+
+        conv_in_w = weights["conv_in.conv.weight"]
+        conv_out_w = weights["conv_out.conv.weight"]
+        return cls(
+            conv_in=(int(conv_in_w.shape[-1]), int(conv_in_w.shape[0])),
+            res_stages=tuple(res_stages),
+            upsamples=tuple(upsamples),
+            conv_out=(int(conv_out_w.shape[-1]), int(conv_out_w.shape[0])),
+        )
+
+    def validate(self, upsample_config: Sequence[tuple[int, int]]) -> None:
+        """Assert the widths chain correctly through the fixed upsample geometry.
+
+        A mis-mapped checkpoint tends to produce a plausible-but-wrong ladder; this turns
+        that into an error at construction instead of garbage pixels.
+        """
+        if len(self.upsamples) != len(upsample_config):
+            raise ValueError(f"{len(self.upsamples)} upsamples but {len(upsample_config)} geometry entries")
+        if len(self.res_stages) != len(self.upsamples) + 1:
+            raise ValueError(f"{len(self.res_stages)} res stages requires {len(self.res_stages) - 1} upsamples")
+
+        width = self.conv_in[1]
+        for i, ((in_c, out_c, adapter_in), (sf, tf)) in enumerate(zip(self.upsamples, upsample_config, strict=True)):
+            expected_in = adapter_in if adapter_in is not None else in_c
+            if self.res_stages[i][0] != width or expected_in != width:
+                raise ValueError(
+                    f"upsample {i}: stage width {width} does not feed "
+                    f"{'adapter' if adapter_in is not None else 'conv'} input {expected_in}"
+                )
+            divisor = sf * sf * tf
+            if out_c % divisor:
+                raise ValueError(f"upsample {i}: {out_c} channels not divisible by shuffle factor {divisor}")
+            width = out_c // divisor
+
+        if self.res_stages[-1][0] != width or self.conv_out[0] != width:
+            raise ValueError(f"final stage width {width} does not match conv_out input {self.conv_out[0]}")
+
+
 class VideoDecoder(nn.Module):
     """Video VAE Decoder with streaming frame output.
 
@@ -163,7 +264,12 @@ class VideoDecoder(nn.Module):
             default), uses symmetric zero-padding and no frame removal.
     """
 
-    def __init__(self, causal: bool = False, spatial_padding_mode: str = "zeros"):
+    def __init__(
+        self,
+        causal: bool = False,
+        spatial_padding_mode: str = "zeros",
+        ladder: DecoderLadder | None = None,
+    ):
         super().__init__()
         self._causal = causal
 
@@ -173,33 +279,56 @@ class VideoDecoder(nn.Module):
         # the keyframe hold-cut-decay regression at the latent boundary).
         sp_mode = spatial_padding_mode
 
-        # Input convolution: 128 latent channels -> 1024
+        # Upsample config: (spatial_factor, temporal_factor) per DepthToSpaceUpsample
+        # up_blocks indices 1, 3, 5, 7. Fixed by the 32x-spatial / 8x-temporal compression
+        # contract -- shared by every variant, pruned or not.
+        self._upsample_config: list[tuple[int, int]] = [
+            (2, 2),  # block 1: stock 4096 / (2*2*2) = 512
+            (2, 2),  # block 3: stock 4096 / (2*2*2) = 512
+            (1, 2),  # block 5: stock  512 / (1*1*2) = 256
+            (2, 1),  # block 7: stock  512 / (2*2*1) = 128
+        ]
+
+        self.ladder = ladder if ladder is not None else DecoderLadder.stock()
+        self.ladder.validate(self._upsample_config)
+
+        latent_channels, first_width = self.ladder.conv_in
         self.conv_in = Conv3dBlock(
-            128,
-            1024,
+            latent_channels,
+            first_width,
             kernel_size=3,
             padding=1,
             causal=causal,
             spatial_padding_mode=sp_mode,
         )
 
-        # Flat list of up_blocks -- indices must match weight keys exactly.
-        self.up_blocks: list[Any] = [
-            ResBlockStage(1024, num_blocks=2, causal=causal, spatial_padding_mode=sp_mode),  # 0
-            DepthToSpaceUpsample(1024, 4096, causal=causal, spatial_padding_mode=sp_mode),  # 1
-            ResBlockStage(512, num_blocks=2, causal=causal, spatial_padding_mode=sp_mode),  # 2
-            DepthToSpaceUpsample(512, 4096, causal=causal, spatial_padding_mode=sp_mode),  # 3
-            ResBlockStage(512, num_blocks=4, causal=causal, spatial_padding_mode=sp_mode),  # 4
-            DepthToSpaceUpsample(512, 512, causal=causal, spatial_padding_mode=sp_mode),  # 5
-            ResBlockStage(256, num_blocks=6, causal=causal, spatial_padding_mode=sp_mode),  # 6
-            DepthToSpaceUpsample(256, 512, causal=causal, spatial_padding_mode=sp_mode),  # 7
-            ResBlockStage(128, num_blocks=4, causal=causal, spatial_padding_mode=sp_mode),  # 8
-        ]
+        # Flat list of up_blocks -- indices must match weight keys exactly. Even indices
+        # are ResStages, odd indices DepthToSpaceUpsamples (optionally preceded by a
+        # channel adapter on pruned checkpoints).
+        self.up_blocks: list[Any] = []
+        for i in range(len(self.ladder.res_stages) + len(self.ladder.upsamples)):
+            if i % 2 == 0:
+                channels, num_blocks = self.ladder.res_stages[i // 2]
+                self.up_blocks.append(
+                    ResBlockStage(channels, num_blocks=num_blocks, causal=causal, spatial_padding_mode=sp_mode)
+                )
+            else:
+                in_c, out_c, adapter_in = self.ladder.upsamples[i // 2]
+                self.up_blocks.append(
+                    DepthToSpaceUpsample(
+                        in_c,
+                        out_c,
+                        causal=causal,
+                        spatial_padding_mode=sp_mode,
+                        adapter_in_channels=adapter_in,
+                    )
+                )
 
-        # Output convolution: 128 -> 48 (3 RGB x 16 for spatial pixel shuffle)
+        # Output convolution: final width -> 48 (3 RGB x 16 for spatial pixel shuffle)
+        final_width, out_channels = self.ladder.conv_out
         self.conv_out = Conv3dBlock(
-            128,
-            48,
+            final_width,
+            out_channels,
             kernel_size=3,
             padding=1,
             causal=causal,
@@ -207,16 +336,7 @@ class VideoDecoder(nn.Module):
         )
 
         # Per-channel normalization statistics
-        self.per_channel_statistics = PerChannelStatistics(128)
-
-        # Upsample config: (spatial_factor, temporal_factor) per DepthToSpaceUpsample
-        # up_blocks indices 1, 3, 5, 7
-        self._upsample_config: list[tuple[int, int]] = [
-            (2, 2),  # block 1: 4096 / (2*2*2) = 512
-            (2, 2),  # block 3: 4096 / (2*2*2) = 512
-            (1, 2),  # block 5: 512 / (1*1*2) = 256
-            (2, 1),  # block 7: 512 / (2*2*1) = 128
-        ]
+        self.per_channel_statistics = PerChannelStatistics(latent_channels)
 
     def denormalize_latent(self, latent: mx.array) -> mx.array:
         """Reverse per-channel normalization: x * std + mean.

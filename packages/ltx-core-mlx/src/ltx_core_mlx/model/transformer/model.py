@@ -373,20 +373,23 @@ class LTXModel(nn.Module):
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
         """
         # Cast inputs to bfloat16 to match weight dtype and avoid mixed-precision
-        # accumulation errors over 48 transformer blocks
-        video_latent = video_latent.astype(mx.bfloat16)
-        audio_latent = audio_latent.astype(mx.bfloat16)
+        # accumulation errors over 48 transformer blocks.
+        # LTX2_DIT_FP32=1 keeps fp32 (parity-testing only — clean apples-to-apples
+        # vs an fp32 Swift port without bf16 rounding noise).
+        _dt = mx.float32 if _os.environ.get("LTX2_DIT_FP32") else mx.bfloat16
+        video_latent = video_latent.astype(_dt)
+        audio_latent = audio_latent.astype(_dt)
         if video_text_embeds is not None:
-            video_text_embeds = video_text_embeds.astype(mx.bfloat16)
+            video_text_embeds = video_text_embeds.astype(_dt)
         if audio_text_embeds is not None:
-            audio_text_embeds = audio_text_embeds.astype(mx.bfloat16)
+            audio_text_embeds = audio_text_embeds.astype(_dt)
 
         # Embed patches
         video_hidden = self.patchify_proj(video_latent)
         audio_hidden = self.audio_patchify_proj(audio_latent)
 
         # --- Timestep embeddings ---
-        timestep = timestep.astype(mx.bfloat16)
+        timestep = timestep.astype(_dt)
         t_emb = self._embed_timestep_scalar(timestep)
 
         # AV cross-attention gate uses a different timestep scale (default 1, not 1000).
