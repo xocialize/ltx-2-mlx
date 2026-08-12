@@ -37,3 +37,4 @@ Thumbs.db
 
 # Local benchmark / regression test artifacts
 regression_tests/
+.work/

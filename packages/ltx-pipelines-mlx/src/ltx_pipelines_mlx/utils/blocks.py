@@ -90,8 +90,12 @@ class PromptEncoder:
     def load(self) -> None:
         """Load Gemma + connector if not already loaded."""
         if self._text_encoder is None:
-            self._text_encoder = GemmaLanguageModel()
-            self._text_encoder.load(self.gemma_model_id)
+            from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import resolve_text_encoder
+
+            # LTX-2.5 conversions ship the tuned Gemma-4 TE in-dir
+            # (gemma4-12b-ltx-v1/); 2.3 uses the external Gemma-3 id.
+            self._text_encoder = resolve_text_encoder(self.model_dir, self.gemma_model_id)
+            self._text_encoder.load()
             aggressive_cleanup()
 
         if self._feature_extractor is None:

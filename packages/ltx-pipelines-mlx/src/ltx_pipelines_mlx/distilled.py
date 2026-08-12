@@ -35,7 +35,7 @@ from ltx_core_mlx.utils.positions import (
     compute_video_positions,
 )
 
-from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
+from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, detect_model_version
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
 from .utils.progress import phase
@@ -229,6 +229,19 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         x0_model = X0Model(stage1_dit)
 
+        # --- LTX-2.5 sampling deltas (upstream distilled.py:60-84 + tools.py) ---
+        # >= (2,5): ancestral Euler stage 1 (eta=1.0, s_noise=1.0, noise seed
+        # = pipeline seed + 10000) and the first-latent-frame keyframes mask
+        # (the trained keyframes embedding expects it on every forward).
+        is_v25 = detect_model_version(self.model_dir) >= (2, 5)
+        kf_mask_1 = None
+        if is_v25 and getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
+            from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
+
+            kf_mask_1 = first_latent_frame_keyframes_mask(
+                video_state.latent.shape[1], H_half * W_half, batch=video_state.latent.shape[0]
+            )
+
         self._pre_denoise_flush(video_state, audio_state)
         output_1 = denoise_loop(
             model=x0_model,
@@ -238,6 +251,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_1,
             video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
+            keyframes_mask=kf_mask_1,
+            ancestral_eta=1.0 if is_v25 else 0.0,
+            noise_seed=seed + 10000,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -313,6 +329,14 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             tiler_2 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_full, W_full))
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
+        kf_mask_2 = None
+        if is_v25 and getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
+            from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
+
+            kf_mask_2 = first_latent_frame_keyframes_mask(
+                video_state_2.latent.shape[1], H_full * W_full, batch=video_state_2.latent.shape[0]
+            )
+
         self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=stage2_x0_model,
@@ -322,6 +346,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
+            keyframes_mask=kf_mask_2,
         )
         if self.low_memory:
             aggressive_cleanup()
