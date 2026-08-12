@@ -129,13 +129,13 @@ class Gemma4LanguageModel(GemmaLanguageModel):
 
     # --- Prompt enhancement: not supported on the unified checkpoint ---
 
-    def enhance_t2v(self, *args, **kwargs) -> str:  # noqa: D102
+    def enhance_t2v(self, *args, **kwargs) -> str:
         raise NotImplementedError(
             "gemma4_unified is encode-only; prompt enhancement needs a separate "
             "generative Gemma checkpoint (upstream --prompt-enhancer-gemma-root)."
         )
 
-    def enhance_i2v(self, *args, **kwargs) -> str:  # noqa: D102
+    def enhance_i2v(self, *args, **kwargs) -> str:
         raise NotImplementedError(
             "gemma4_unified is encode-only; prompt enhancement needs a separate "
             "generative Gemma checkpoint (upstream --prompt-enhancer-gemma-root)."

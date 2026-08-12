@@ -299,7 +299,7 @@ class VideoDecoder:
 
 
 def _write_frames_and_mux(
-    pixels: "mx.array",
+    pixels: mx.array,
     output_path: str,
     frame_rate: float = 24.0,
     audio_path: str | None = None,

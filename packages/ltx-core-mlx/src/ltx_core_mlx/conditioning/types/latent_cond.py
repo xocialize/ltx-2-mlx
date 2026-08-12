@@ -20,6 +20,16 @@ class LatentState:
         denoise_mask: Per-token mask: 1.0 = denoise (generate), 0.0 = preserve.
         positions: Positional indices (B, N, num_axes) or None.
         attention_mask: Self-attention mask (B, N, N) with values in [0,1], or None.
+        keyframes_mask: (B, N, 1) marker for tokens that receive the DiT's learned
+            keyframes absolute-position embedding (LTX-2.5). None on 2.3.
+        generated_keyframe_layout: Set when generated keyframe slots were appended;
+            locates them for read-back after denoising (LTX-2.5 multishot).
+
+    ⚠️ Any conditioning that returns a NEW LatentState must propagate the last two
+    fields explicitly. Dropping them is silent — the slots stay in the sequence and
+    still denoise, but become unlocatable and lose their keyframes marking, which
+    degrades quietly instead of raising. ``scripts/gate_ltx25_slot_conditioning.py``
+    applies every conditioning type after slots specifically to catch that.
     """
 
     latent: mx.array
@@ -27,6 +37,8 @@ class LatentState:
     denoise_mask: mx.array
     positions: mx.array | None = None
     attention_mask: mx.array | None = None
+    keyframes_mask: mx.array | None = None
+    generated_keyframe_layout: object | None = None
 
 
 class VideoConditionByLatentIndex:
@@ -85,6 +97,8 @@ class VideoConditionByLatentIndex:
             denoise_mask=new_mask,
             positions=state.positions,
             attention_mask=state.attention_mask,
+                    keyframes_mask=state.keyframes_mask,
+            generated_keyframe_layout=state.generated_keyframe_layout,
         )
 
 
@@ -236,6 +250,8 @@ def noise_latent_state(
         denoise_mask=state.denoise_mask,
         positions=state.positions,
         attention_mask=state.attention_mask,
+        keyframes_mask=state.keyframes_mask,
+        generated_keyframe_layout=state.generated_keyframe_layout,
     )
 
 

@@ -162,7 +162,7 @@ def first_latent_frame_keyframes_mask(
     total_tokens: int,
     tokens_per_latent_frame: int,
     batch: int = 1,
-) -> "mx.array":
+) -> mx.array:
     """(B, N, 1) keyframes mask marking the target's FIRST latent frame.
 
     LTX-2.5: the causal video encoder makes latent frame 0 cover a single

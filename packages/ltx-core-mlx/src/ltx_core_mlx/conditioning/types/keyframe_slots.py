@@ -36,6 +36,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
+from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.utils.positions import compute_video_positions
 
 
@@ -191,3 +192,83 @@ def resolve_generated_keyframes(generated_keyframes: int | Sequence[int], num_fr
             f"{sorted(int(p) for p in generated_keyframes)}"
         )
     return positions
+
+
+class VideoGeneratedKeyframeSlots:
+    """Conditioning item that appends one denoised slot per requested pixel frame.
+
+    All slots go into ONE item so their tokens form a single contiguous,
+    exactly-locatable range (upstream ``helpers.generated_keyframe_conditionings``
+    makes the same guarantee, and the read-back depends on it).
+
+    ⚠️ Apply at most once per state. Upstream raises on a second application
+    because a second ``GeneratedKeyframeLayout`` would overwrite the first and
+    silently orphan the earlier slots; we raise for the same reason.
+
+    ⚠️ Slot tokens are appended ALREADY NOISED. Upstream appends zeros and lets
+    the noiser fill them (``denoise_mask`` 1, ``clean_latent`` 0, so the lerp
+    yields pure noise at sigma 1.0). Our stage-1 callsites use
+    ``legacy_scalar_blend=True``, which noises BEFORE conditionings run — an
+    appended zero block would stay zero and the slot would never be generated.
+    Noising here reproduces upstream's sigma-1.0 result exactly while fitting our
+    ordering; ``noise_seed`` is separate from the base noise so the slot block is
+    not a repeat of the first tokens.
+    """
+
+    def __init__(
+        self,
+        pixel_frame_indices: Sequence[int],
+        frame_rate: float,
+        sigma: float = 1.0,
+        noise_seed: int = 0,
+    ):
+        self.pixel_frame_indices = tuple(int(i) for i in pixel_frame_indices)
+        self.frame_rate = float(frame_rate)
+        self.sigma = float(sigma)
+        self.noise_seed = int(noise_seed)
+        self.layout: GeneratedKeyframeLayout | None = None
+
+    def apply(self, state: LatentState, spatial_dims: tuple[int, int, int]) -> LatentState:
+        if state.generated_keyframe_layout is not None:
+            raise ValueError(
+                "Generated keyframe slots were already applied to this state; use a single item"
+            )
+        _f, height, width = spatial_dims
+        latent, denoise_mask, positions, clean_latent, keyframes_mask, layout = append_keyframe_slots(
+            latent=state.latent,
+            denoise_mask=state.denoise_mask,
+            positions=state.positions,
+            clean_latent=state.clean_latent,
+            keyframes_mask=state.keyframes_mask,
+            pixel_frame_indices=self.pixel_frame_indices,
+            height=height,
+            width=width,
+            fps=self.frame_rate,
+        )
+        n_new = latent.shape[1] - state.latent.shape[1]
+        mx.random.seed(self.noise_seed)
+        noise = mx.random.normal((latent.shape[0], n_new, latent.shape[2])).astype(latent.dtype)
+        latent = mx.concatenate([latent[:, : state.latent.shape[1]], noise * self.sigma], axis=1)
+
+        self.layout = layout
+        return LatentState(
+            latent=latent,
+            clean_latent=clean_latent,
+            denoise_mask=denoise_mask,
+            positions=positions,
+            attention_mask=state.attention_mask,
+            keyframes_mask=keyframes_mask,
+            generated_keyframe_layout=layout,
+        )
+
+
+__all__ = [
+    "GeneratedKeyframeLayout",
+    "VideoGeneratedKeyframeSlots",
+    "append_keyframe_slots",
+    "evenly_spaced_keyframe_positions",
+    "extract_keyframes",
+    "has_generated_keyframes",
+    "resolve_generated_keyframes",
+    "slot_positions",
+]

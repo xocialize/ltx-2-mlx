@@ -45,6 +45,7 @@ from ltx_core_mlx.model.video_vae.na3d import (
     rope_inv_freqs,
 )
 
+
 # NA backend, selected by LTX2_NA_IMPL:
 #   "box"    (DEFAULT) shared key box per query tile + MLX's fused SDPA with a
 #            cached boolean window mask. 6x faster end-to-end (15.5s vs 93.0s on
