@@ -63,9 +63,44 @@ detailing LoRA is loaded, that LoRA is opt-in with no default, and we do not hos
 one. Without it the reference tokens are out of distribution, because the adapter
 that teaches the model to read them is precisely what is absent.
 
+## Temporal rounds — measured, and they are NOT an efficiency win
+
+Rounds now work (audio-free denoise path shipped). Every arm below emits **97
+frames** at 512×768, ffprobe-verified:
+
+| arm | requested | out | playback fps | wall-clock | peak | vs native |
+|---|---:|---:|---:|---:|---:|---:|
+| distilled native | 97 | 97 | 24 | 50.2 s | 40.76 GB | 1.000× |
+| DFR rounds=0 | 97 | 97 | 24 | 64.2 s | 41.66 GB | 1.279× |
+| DFR rounds=1 | 49 | 97 | 48 | 138.9 s | 44.37 GB | 2.767× |
+| DFR rounds=2 | 25 | 97 | 96 | 177.8 s | 44.37 GB | 3.542× |
+
+**Read this carefully — the arms match on frame COUNT, not on duration.** Each
+round maps N → 2(N−1)+1 at double the playback fps, so native is 4.0 s of 24 fps
+video while rounds=2 is 1.0 s of 96 fps video. Same 97 frames, different clips.
+
+**The decisive control settles it.** The deliverable of rounds=1 is *2 s at
+48 fps*. Generating that natively — 97 frames with `frame_rate=48` — costs
+**49.2 s / 40.75 GB**, versus **138.9 s** for DFR rounds=1. Same frame count,
+same token count, same output duration and fps: **native is 2.8× cheaper.**
+
+So on wall-clock, **temporal rounds are not an efficiency mechanism.** Reading
+"more efficient generation" onto them is not supported by anything measured here.
+The case for rounds has to be *quality* — staying inside the model's trained fps
+distribution instead of asking it to lay out 8 pixel frames per latent token at a
+compressed time base (the reason `_MAX_CONDITIONING_FPS` exists at all).
+
+**That quality case is NOT settled here.** A per-frame motion-regularity proxy
+mildly favours DFR (std/mean 0.143 vs 0.198; max/median 1.41 vs 1.67 — i.e.
+native@48fps is a little more irregular, in the direction of the predicted
+spike-then-stall). That is weak evidence from a no-reference proxy on clips with
+different compositions, which is the trap C7 already sprung once. It is recorded
+as a hint, not a verdict, and needs an operator A/B.
+
 ## Owed
 
-1. Audio-free denoise path → then the temporal rounds, which is the half of the
-   C2 efficiency claim about densifying time rather than detailing space.
-2. Operator A/B on `distilled.mp4` vs `dfr.mp4`.
-3. Re-measure cost with rounds enabled; the ×1.174 above covers rounds=0 only.
+1. Operator A/B: `distilled.mp4` vs `dfr.mp4` (spatial), and `dfr_rounds1.mp4`
+   vs `native_48fps.mp4` (temporal) — the second is the one that decides whether
+   rounds earn their 2.8×.
+2. Longer clips: rounds may pay off where native high-fps generation runs out of
+   sequence length, which is a regime this 97-frame test never enters.
