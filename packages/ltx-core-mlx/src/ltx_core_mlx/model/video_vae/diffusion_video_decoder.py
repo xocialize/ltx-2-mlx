@@ -209,6 +209,40 @@ def timestep_embedding(t: mx.array, dim: int = 256) -> mx.array:
     return mx.concatenate([emb[:, half:], emb[:, :half]], axis=-1)
 
 
+class _TimestepEmbedder(nn.Module):
+    """Mirrors the checkpoint layout ``t_embedder.timestep_embedder.linear{1,2}``."""
+
+    def __init__(self, in_dim: int, dim: int):
+        super().__init__()
+        self.timestep_embedder = _TwoLayerMLP(in_dim, dim)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.timestep_embedder(x)
+
+
+class _TwoLayerMLP(nn.Module):
+    def __init__(self, in_dim: int, dim: int):
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, dim)
+        self.linear2 = nn.Linear(dim, dim)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.linear2(nn.silu(self.linear1(x)))
+
+
+class _AdaLNZero(nn.Module):
+    """Mirrors ``shared_adaln.proj``; 7 chunks, order scale/shift/gate x2 + gate_ctx."""
+
+    def __init__(self, t_emb_dim: int, dim: int):
+        super().__init__()
+        self.proj = nn.Linear(t_emb_dim, 7 * dim)
+
+    def __call__(self, t_emb: mx.array) -> list[mx.array]:
+        h = self.proj(nn.silu(t_emb))
+        d = h.shape[-1] // 7
+        return [h[:, i * d : (i + 1) * d].reshape(-1, 1, 1, 1, d) for i in range(7)]
+
+
 class DiffusionVideoDecoder(nn.Module):
     """LTX-2.5 DiffVAE decoder (1-step x0 by default)."""
 
@@ -252,15 +286,17 @@ class DiffusionVideoDecoder(nn.Module):
             LinearPixelShuffleUpsample(stage_channels[i], upsample_strides[i], upsample_reductions[i])
             for i in range(4)
         ]
-        self.t_embedder = nn.Sequential(
-            nn.Linear(256, t_emb_dim), nn.SiLU(), nn.Linear(t_emb_dim, t_emb_dim)
-        )
+        self.t_embedder = _TimestepEmbedder(256, t_emb_dim)
         self.conv_in_x_t = nn.Linear(out_channels * patch_size * patch_size, c5)
-        self.shared_adaln = nn.Linear(t_emb_dim, 7 * c5)
+        self.shared_adaln = _AdaLNZero(t_emb_dim, c5)
         self.diff_blocks = [
             DiffusionNABlock(c5, self.stage5_kernel, self.context_channels, head_dim)
             for _ in range(stage_depths[4])
         ]
+        # geometry constants derived from the stage config (dvd.py:115-159)
+        self.temporal_scale = math.prod(st[0] for st in upsample_strides)
+        self.natten_trailing_pad = (stage_kernels[0][0] // 2) * 2
+        self.stage_min_tile_sizes = (3, max(k[1] for k in stage_kernels), max(k[2] for k in stage_kernels))
         self.norm_out = nn.RMSNorm(c5, eps=1e-6)
         self.conv_out = nn.Linear(c5, out_channels * patch_size * patch_size)
         self.type_emb = mx.zeros((in_channels,))
@@ -292,9 +328,7 @@ class DiffusionVideoDecoder(nn.Module):
         x = self.conv_in_x_t(patched.transpose(0, 2, 3, 4, 1))
 
         t_emb = self.t_embedder(timestep_embedding(t * self.timestep_scale_multiplier))
-        chunks = self.shared_adaln(nn.silu(t_emb))
-        c5 = chunks.shape[-1] // 7
-        shared = [chunks[:, i * c5 : (i + 1) * c5].reshape(-1, 1, 1, 1, c5) for i in range(7)]
+        shared = self.shared_adaln(t_emb)
 
         for blk in self.diff_blocks:
             x = blk(x, context, shared, tile)
@@ -303,3 +337,92 @@ class DiffusionVideoDecoder(nn.Module):
         x = self.conv_out(self.norm_out(x))
         x = x.transpose(0, 4, 1, 2, 3)
         return unpatchify_hw(x, self.patch_size)
+
+    # --- padding / cropping helpers (ports of diffusion_tiling.resize_axis) ---
+
+    @staticmethod
+    def _resize_axis(x: mx.array, axis: int, size: int, mode: str) -> mx.array:
+        """Pad or crop ``axis`` to ``size``. ``repeat_last`` | ``symmetric``.
+
+        Port of ``diffusion_tiling.resize_axis``: repeat_last appends copies of
+        the last slice (crops from the end); symmetric edge-replicates both
+        ends with ``before = need // 2``, remainder to the end.
+        """
+        length = x.shape[axis]
+        if length == size:
+            return x
+        idx = list(range(length))
+        if length < size:
+            need = size - length
+            if mode == "repeat_last":
+                idx = idx + [length - 1] * need
+            else:
+                before = need // 2
+                after = need - before
+                idx = [0] * before + idx + [length - 1] * after
+        else:
+            drop = length - size
+            if mode == "repeat_last":
+                idx = idx[:size]
+            else:
+                before = drop // 2
+                idx = idx[before : before + size]
+        return mx.take(x, mx.array(idx), axis=axis)
+
+    def ensure_min_latent_shape(self, latent: mx.array) -> mx.array:
+        """Pad (B,C,T,H,W) up to ``stage_min_tile_sizes`` = (3, 7, 7)."""
+        min_t, min_h, min_w = self.stage_min_tile_sizes
+        x = latent
+        if x.shape[2] < min_t:
+            x = self._resize_axis(x, 2, min_t, "repeat_last")
+        if x.shape[3] < min_h:
+            x = self._resize_axis(x, 3, min_h, "symmetric")
+        if x.shape[4] < min_w:
+            x = self._resize_axis(x, 4, min_w, "symmetric")
+        return x
+
+    def decode(
+        self,
+        latent: mx.array,
+        noise: mx.array | None = None,
+        tile: tuple[int | None, int | None] = (1, 8),
+        key: mx.array | None = None,
+    ) -> mx.array:
+        """Full 1-step x0 decode: latent (B,C,T,H,W) -> pixels (B,3,F,H*32,W*32).
+
+        Returns pixels in **[-1, 1]** (the ``(x+1)*0.5`` clamp lives in
+        :func:`decode_to_rgb`, matching the reference's ``decode_video``).
+
+        With ``num_inference_steps=1`` and ``model_output_type="x0"`` the
+        reference short-circuits: no Euler step, no velocity transform — the
+        model output IS the pixels, evaluated at **t = 1.0** from a pure-noise
+        canvas (`dvd.py:386-395`, `:537`).
+        """
+        if self.model_output_type != "x0":
+            raise NotImplementedError(
+                f"only the 1-step x0 path is ported; got model_output_type={self.model_output_type!r}"
+            )
+        x = self.ensure_min_latent_shape(latent)
+        # NATTEN last-frame border workaround: replicate the final latent frame
+        x = self._resize_axis(x, 2, x.shape[2] + self.natten_trailing_pad, "repeat_last")
+
+        context = self.context_volume(x, tile)
+        # crop the ghost appendix, keeping at least stage5_kernel_t frames
+        ghost = self.natten_trailing_pad * self.temporal_scale
+        content_t = max(context.shape[1] - ghost, 1)
+        keep = min(context.shape[1], max(content_t, self.stage5_kernel[0]))
+        context = self._resize_axis(context, 1, keep, "repeat_last")
+        mx.eval(context)
+
+        B, F, H4, W4, _ = context.shape
+        pix = (B, self.out_channels, F, H4 * self.patch_size, W4 * self.patch_size)
+        if noise is None:
+            noise = mx.random.normal(pix, key=key)
+        assert tuple(noise.shape) == pix, f"noise {noise.shape} != expected {pix}"
+
+        t = mx.ones((B,), dtype=mx.float32)
+        return self.diff_step(context, noise, t, tile)
+
+    def decode_to_rgb(self, latent: mx.array, **kw) -> mx.array:
+        """:meth:`decode` mapped to [0, 1] — the reference's ``decode_video`` tail."""
+        return mx.clip((self.decode(latent, **kw) + 1.0) * 0.5, 0.0, 1.0)

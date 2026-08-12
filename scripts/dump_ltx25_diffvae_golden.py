@@ -126,6 +126,31 @@ def main() -> None:
     out["dv_diffblock_out"] = one.numpy()
     out["dv_stage5_out"] = full.numpy()
 
+    # E: FULL end-to-end decode at the minimum legal latent (3,7,7).
+    # Uses a fixed noise canvas so the MLX side can be fed the identical draw.
+    lat = rng.standard_normal((1, 128, 3, 7, 7)).astype(np.float32)
+    with torch.no_grad():
+        padded = torch.tensor(lat)
+        from ltx_core.model.video_vae.diffusion_tiling import (
+            crop_trailing_context_natten_pad,
+            pad_trailing_latent_for_natten_border,
+        )
+        # ghost-pad the RAW latent; forward_stages_1_to_3 un-normalizes internally
+        z = pad_trailing_latent_for_natten_border(padded, dec._natten_trailing_pad_latent_frames)
+        feat = dec.forward_stages_1_to_3(z, drop_leading_frame=True)
+        ctx4 = dec.forward_stage_4(feat, drop_leading_frame=True)
+        F5, H5, W5 = ctx4.shape[1], ctx4.shape[2] * dec.patch_size, ctx4.shape[3] * dec.patch_size
+        noise = rng.standard_normal((1, 3, F5, H5, W5)).astype(np.float32)
+        cx = torch.cat([ctx4, dec.conv_in_x_t(
+            __import__("ltx_core.model.video_vae.ops", fromlist=["patchify"]).patchify(
+                torch.tensor(noise), patch_size_hw=4, patch_size_t=1).permute(0, 2, 3, 4, 1))], dim=-1)
+        pixels = dec.forward_diff_step(cx, torch.ones(1))
+    out["dv_decode_latent"] = lat
+    out["dv_decode_noise"] = noise
+    out["dv_decode_context"] = ctx4.numpy()
+    out["dv_decode_pixels"] = pixels.numpy()
+    print(f"  E: latent {lat.shape} -> context {tuple(ctx4.shape)} -> pixels {tuple(pixels.shape)}")
+
     for k, v in out.items():
         np.save(G / f"{k}.npy", v)
     print("  saved:", {k: tuple(v.shape) for k, v in out.items()})

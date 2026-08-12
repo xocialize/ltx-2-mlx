@@ -9,6 +9,9 @@ Gates, in dependency order:
   [B] one LinearPixelShuffleUpsample (upsamples.3, stride (2,2,2), frame drop)
   [C] one stage-5 DiffusionNABlock  (diff_blocks.0, dim 256, kernel 11^3)
   [D] the full stage-5 stack        (8 blocks + norm_out + conv_out + unpatchify)
+  [E] the FULL end-to-end decode    (ghost pad -> stages 1-4 -> crop -> 1-step
+      x0 at t=1.0 from the reference's noise canvas), at the minimum legal
+      latent (3,7,7) -> 17x224x224 pixels
 
 Threshold: cosine >= 0.9999. Absolute deltas land ~1e-3, which is Apple-GPU
 fp32 matmul noise (documented in na3d.py and measured repeatedly on this
@@ -113,7 +116,28 @@ def main() -> None:
     y = conv_out(norm_out(x)).transpose(0, 4, 1, 2, 3)
     check("D stage-5 stack ", unpatchify_hw(y, 4), np.load(GOLDENS / "dv_stage5_out.npy"))
 
-    print(f"DIFFVAE COMPONENT GATE: {'PASS' if ok else 'FAIL'}")
+    # [E] full end-to-end decode, fed the reference's noise so the comparison
+    # is deterministic (the real path draws it from a seeded generator).
+    from ltx_core_mlx.model.video_vae.diffusion_video_decoder import DiffusionVideoDecoder
+
+    dec = DiffusionVideoDecoder()
+    dec.load_weights([(k, v) for k, v in w.items()], strict=True)
+    ctx_ref = np.load(GOLDENS / "dv_decode_context.npy")
+    lat = mx.array(np.load(GOLDENS / "dv_decode_latent.npy"))
+    padded = dec._resize_axis(dec.ensure_min_latent_shape(lat), 2,
+                              lat.shape[2] + dec.natten_trailing_pad, "repeat_last")
+    ctx = dec.context_volume(padded, tile=(1, 8))
+    ghost = dec.natten_trailing_pad * dec.temporal_scale
+    keep = min(ctx.shape[1], max(max(ctx.shape[1] - ghost, 1), dec.stage5_kernel[0]))
+    ctx = dec._resize_axis(ctx, 1, keep, "repeat_last")
+    mx.eval(ctx)
+    check("E ladder 1-4    ", ctx, ctx_ref)
+
+    pix = dec.decode(lat, noise=mx.array(np.load(GOLDENS / "dv_decode_noise.npy")), tile=(1, 8))
+    mx.eval(pix)
+    check("E full decode   ", pix, np.load(GOLDENS / "dv_decode_pixels.npy"))
+
+    print(f"DIFFVAE GATE: {'PASS' if ok else 'FAIL'}")
     assert ok
 
 
