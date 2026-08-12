@@ -180,13 +180,20 @@ def na3d(
             ih_s = ih[h0:h1]
             tt, th = t1 - t0, h1 - h0
 
+            # ONE flat gather. Three sequential per-axis takes materialise
+            # oversized intermediates (the first spans the full H x W plane
+            # before narrowing) — measured as the dominant cost. Building a
+            # single flat token index and taking once allocates only the
+            # result.
+            flat = (
+                it_s.reshape(tt, 1, 1, kt, 1, 1) * (H * W)
+                + ih_s.reshape(1, th, 1, 1, kh, 1) * W
+                + iw.reshape(1, 1, W, 1, 1, kw)
+            ).reshape(-1)  # (tt*th*W*kt*kh*kw,), key order (t, h, w)
+
             def gather(src: mx.array) -> mx.array:
-                g = mx.take(src, it_s.reshape(-1), axis=1).reshape(B, tt, kt, H, W, NH, HD)
-                g = mx.take(g, ih_s.reshape(-1), axis=3).reshape(B, tt, kt, th, kh, W, NH, HD)
-                g = mx.take(g, iw.reshape(-1), axis=5).reshape(B, tt, kt, th, kh, W, kw, NH, HD)
-                # -> (B, tt, th, W, NH, kt*kh*kw, HD), key order (t, h, w)
-                g = g.transpose(0, 1, 3, 5, 7, 2, 4, 6, 8)
-                return g.reshape(B, tt, th, W, NH, kt * kh * kw, HD)
+                g = mx.take(src.reshape(B, T * H * W, NH, HD), flat, axis=1)
+                return g.reshape(B, tt, th, W, kt * kh * kw, NH, HD).transpose(0, 1, 2, 3, 5, 4, 6)
 
             kk = gather(k)
             vv = gather(v)

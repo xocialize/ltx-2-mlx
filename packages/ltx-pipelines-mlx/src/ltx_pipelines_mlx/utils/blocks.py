@@ -290,7 +290,7 @@ class VideoDecoder:
             # DiffVAE decodes the whole clip in one 1-step x0 pass (it has no
             # streaming/chunked path yet), then reuses the conv decoder's
             # frame-writer for muxing.
-            pixels = decoder.decode_to_rgb(video_latent, tile=(1, 8))
+            pixels = decoder.decode_to_rgb(video_latent, tile=(1, 8))  # smaller tiles measured faster
             mx.eval(pixels)
             _write_frames_and_mux(pixels, output_path, frame_rate=frame_rate, audio_path=audio_path)
             return output_path
