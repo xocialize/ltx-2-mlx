@@ -144,6 +144,7 @@ def na3d(
     kernel: tuple[int, int, int],
     scale: float = 1.0,
     query_tile_t: int | None = None,
+    query_tile_h: int | None = None,
 ) -> mx.array:
     """Mask-free 3D neighborhood attention.
 
@@ -151,9 +152,12 @@ def na3d(
         q, k, v: (B, T, H, W, NH, HD) — already normed, scaled and RoPE'd.
         kernel: (k_t, k_h, k_w); each axis clamps to its length.
         scale: kept at 1.0 by the caller (the scale is folded into Q).
-        query_tile_t: optional temporal chunking of the *query* axis to bound
-            the gathered K/V working set. Purely a memory device — the window
-            of each query is gathered independently, so any tiling is exact.
+        query_tile_t, query_tile_h: optional chunking of the *query* T and H
+            axes to bound the gathered K/V working set. Purely a memory device
+            — each query's window is gathered independently, so any tiling is
+            bit-exact (gated). Needed on real volumes: the smallest legal
+            latent (3,7,7) already gives a 17x56x56 stage-5 grid, which at
+            11^3 keys/query would need ~72 GB untiled.
 
     Returns:
         (B, T, H, W, NH, HD)
@@ -163,35 +167,40 @@ def na3d(
     ih, kh = _axis_index(H, kernel[1])
     iw, kw = _axis_index(W, kernel[2])
 
-    if query_tile_t is None:
-        query_tile_t = T
+    query_tile_t = T if query_tile_t is None else query_tile_t
+    query_tile_h = H if query_tile_h is None else query_tile_h
 
-    outs = []
+    t_rows = []
     for t0 in range(0, T, query_tile_t):
         t1 = min(t0 + query_tile_t, T)
-        it_s = it[t0:t1]  # (tt, kt)
+        it_s = it[t0:t1]
+        h_cols = []
+        for h0 in range(0, H, query_tile_h):
+            h1 = min(h0 + query_tile_h, H)
+            ih_s = ih[h0:h1]
+            tt, th = t1 - t0, h1 - h0
 
-        # gather K/V windows for this query slab: (B, tt, kt, H, kh, W, kw, NH, HD)
-        def gather(src: mx.array) -> mx.array:
-            g = mx.take(src, it_s.reshape(-1), axis=1)
-            g = g.reshape(B, t1 - t0, kt, H, W, NH, HD)
-            g = mx.take(g, ih.reshape(-1), axis=3).reshape(B, t1 - t0, kt, H, kh, W, NH, HD)
-            g = mx.take(g, iw.reshape(-1), axis=5).reshape(B, t1 - t0, kt, H, kh, W, kw, NH, HD)
-            # -> (B, tt, H, W, NH, kt*kh*kw, HD) with key order (t, h, w)
-            g = g.transpose(0, 1, 3, 5, 7, 2, 4, 6, 8)
-            return g.reshape(B, t1 - t0, H, W, NH, kt * kh * kw, HD)
+            def gather(src: mx.array) -> mx.array:
+                g = mx.take(src, it_s.reshape(-1), axis=1).reshape(B, tt, kt, H, W, NH, HD)
+                g = mx.take(g, ih_s.reshape(-1), axis=3).reshape(B, tt, kt, th, kh, W, NH, HD)
+                g = mx.take(g, iw.reshape(-1), axis=5).reshape(B, tt, kt, th, kh, W, kw, NH, HD)
+                # -> (B, tt, th, W, NH, kt*kh*kw, HD), key order (t, h, w)
+                g = g.transpose(0, 1, 3, 5, 7, 2, 4, 6, 8)
+                return g.reshape(B, tt, th, W, NH, kt * kh * kw, HD)
 
-        kk = gather(k)
-        vv = gather(v)
-        qq = q[:, t0:t1][..., None, :].astype(mx.float32)  # (B,tt,H,W,NH,1,HD)
+            kk = gather(k)
+            vv = gather(v)
+            qq = q[:, t0:t1, h0:h1][..., None, :].astype(mx.float32)
 
-        scores = (qq * kk.astype(mx.float32)).sum(-1) * scale  # (B,tt,H,W,NH,K)
-        probs = mx.softmax(scores, axis=-1, precise=True)
-        out = (probs[..., None] * vv.astype(mx.float32)).sum(-2)
-        outs.append(out.astype(q.dtype))
-        mx.eval(outs[-1])
+            scores = (qq * kk.astype(mx.float32)).sum(-1) * scale
+            probs = mx.softmax(scores, axis=-1, precise=True)
+            out = (probs[..., None] * vv.astype(mx.float32)).sum(-2)
+            h_cols.append(out.astype(q.dtype))
+            mx.eval(h_cols[-1])
+            del kk, vv, qq, scores, probs, out
+        t_rows.append(h_cols[0] if len(h_cols) == 1 else mx.concatenate(h_cols, axis=2))
 
-    return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
+    return t_rows[0] if len(t_rows) == 1 else mx.concatenate(t_rows, axis=1)
 
 
 def na3d_dense_reference(
