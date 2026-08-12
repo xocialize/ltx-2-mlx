@@ -483,9 +483,17 @@ class DFRPipeline(DistilledPipeline):
         a first C2 measurement that skipped this reported +31 GB for DFR and the number
         was entirely this, not the feature.
         """
+        frame_rate = kwargs.pop("frame_rate")
+        rounds = kwargs.get("temporal_upsample_rounds", 0)
         video_latent, audio_latent = self.generate_dfr(
-            prompt=prompt, frame_rate=kwargs.pop("frame_rate"), **kwargs
+            prompt=prompt, frame_rate=frame_rate, **kwargs
         )
+        # ⚠️ PLAYBACK fps is the conditioning fps times 2**rounds. Each round doubles the
+        # temporal sample count for the SAME motion, so muxing at the base rate writes a
+        # 2x/4x slow-motion clip with the right frames — wrong duration, and silently so.
+        # Upstream keeps these two rates separate for exactly this reason (conditioning fps
+        # is additionally capped at 60; playback is decode-only).
+        playback_fps = frame_rate * 2**rounds
         if self.low_memory:
             self.dit = None
             self.prompt_encoder.free()
@@ -496,7 +504,7 @@ class DFRPipeline(DistilledPipeline):
             aggressive_cleanup()
         self._load_decoders()
         result = self._decode_and_save_video(
-            video_latent, audio_latent, output_path, frame_rate=kwargs.get("frame_rate", 24.0)
+            video_latent, audio_latent, output_path, frame_rate=playback_fps
         )
         aggressive_cleanup()
         return result

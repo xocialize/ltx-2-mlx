@@ -97,6 +97,14 @@ spike-then-stall). That is weak evidence from a no-reference proxy on clips with
 different compositions, which is the trap C7 already sprung once. It is recorded
 as a hint, not a verdict, and needs an operator A/B.
 
+⚠️ **Muxing bug found while preparing the A/B, fixed:** `generate_and_save` wrote the
+rounds output at the BASE frame rate, so a rounds=1 clip was a 4.04 s 24 fps
+slow-motion version of a 2.02 s 48 fps result — right frames, wrong duration, no
+error. Playback fps is `frame_rate * 2**rounds` and is decode-only; the
+conditioning fps is a separate, capped quantity. The cost numbers above are
+unaffected (they time generation, not muxing), but any A/B run before this fix
+was comparing a slow-motion clip against a real-time one.
+
 ## Owed
 
 1. Operator A/B: `distilled.mp4` vs `dfr.mp4` (spatial), and `dfr_rounds1.mp4`
