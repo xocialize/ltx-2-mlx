@@ -210,6 +210,21 @@ class DFRPipeline(DistilledPipeline):
                 "audio state). Stage 1 + stage 2 DFR (rounds=0) is supported."
             )
 
+        # ⚠️ ORDER IS LOAD-BEARING: encode the prompt and FREE Gemma before loading the
+        # DiT. The 2.5 text encoder is a bf16 12B (~24 GB); loading it on top of the
+        # 38 GB transformer nearly doubles peak. An earlier revision of this method
+        # called load() first and measured 71.8 GB peak vs 40.8 GB for the plain
+        # distilled pipeline — that entire "DFR costs +31 GB" result was this ordering,
+        # not the feature. It is also the exact mistake commit 1a30f74 fixed for the
+        # other pipelines; see CLAUDE.md "Pipeline-load ordering".
+        self._load_text_encoder()
+        with phase("Encoding prompt", verbose=self.verbose):
+            video_embeds, audio_embeds = self._encode_text(prompt)
+            mx.eval(video_embeds, audio_embeds)
+        if self.low_memory:
+            self.prompt_encoder.free()
+            aggressive_cleanup()
+
         self.load()
         if not getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
             raise ValueError(
@@ -225,9 +240,6 @@ class DFRPipeline(DistilledPipeline):
 
         height, width = snap_output_dimensions(height, width, two_stage=True)
         s1_h, s1_w = (height // 2 // 32) * 32, (width // 2 // 32) * 32
-
-        with phase("Encoding prompt"):
-            video_embeds, audio_embeds = self._encode_text(prompt)
 
         sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
@@ -338,7 +350,9 @@ class DFRPipeline(DistilledPipeline):
             extract_keyframes(out_2.video_latent, slot_item_2.layout, H2, W2), axis=2
         )
         video_latent = self.video_patchifier.unpatchify(out_2.video_latent[:, :n_base_2, :], (F, H2, W2))
-        audio_latent = out_2.audio_latent
+        # Return the audio in latent form (B, 8, T, 16), like every other pipeline —
+        # the decoder unpacks that shape, not the (B, T, 128) token form.
+        audio_latent = self.audio_patchifier.unpatchify(out_2.audio_latent)
         current_fps = frame_rate
 
         # --- Temporal rounds ----------------------------------------------------------
@@ -471,6 +485,33 @@ class DFRPipeline(DistilledPipeline):
         self.dfr_canvas = {"segment": segment, "canvas_frames": num_frames,
                            "requested_frames": requested_frames, "slot_positions": list(positions)}
         return video_latent, audio_latent
+
+
+    def generate_and_save(self, prompt: str, output_path: str, **kwargs) -> str:
+        """Generate with DFR and save, freeing the DiT before the decoders load.
+
+        ⚠️ The free is load-bearing, not tidiness. Decoding with the transformer still
+        resident stacks ~38 GB of weights under the decoder and roughly doubles peak —
+        a first C2 measurement that skipped this reported +31 GB for DFR and the number
+        was entirely this, not the feature.
+        """
+        video_latent, audio_latent = self.generate_dfr(
+            prompt=prompt, frame_rate=kwargs.pop("frame_rate"), **kwargs
+        )
+        if self.low_memory:
+            self.dit = None
+            self.prompt_encoder.free()
+            self.image_conditioner.free()
+            self.upsampler = None
+            self.temporal_upsampler = None
+            self._loaded = False
+            aggressive_cleanup()
+        self._load_decoders()
+        result = self._decode_and_save_video(
+            video_latent, audio_latent, output_path, frame_rate=kwargs.get("frame_rate", 24.0)
+        )
+        aggressive_cleanup()
+        return result
 
 
 __all__ = ["DFRPipeline"]

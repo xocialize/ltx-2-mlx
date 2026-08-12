@@ -1,0 +1,41 @@
+{
+  "prompt": "A lone lighthouse on a rocky headland during a storm, waves exploding against the rocks, the beam sweeping through sheets of rain. Cinematic, high contrast, 35mm.",
+  "config": {
+    "out": ".work/c2",
+    "height": 512,
+    "width": 768,
+    "frames": 97,
+    "seed": 4242,
+    "frame_rate": 24.0
+  },
+  "arms": {
+    "distilled": {
+      "seconds": 52.8,
+      "peak_gb": 40.76,
+      "output": "distilled.mp4"
+    },
+    "dfr": {
+      "seconds_incl_decode": 62.0,
+      "peak_gb": 41.66,
+      "canvas": {
+        "segment": 32,
+        "canvas_frames": 97,
+        "requested_frames": 97,
+        "slot_positions": [
+          32,
+          64,
+          96
+        ]
+      },
+      "num_slots": 3,
+      "output": "dfr.mp4"
+    }
+  },
+  "comparison": {
+    "dfr_vs_distilled_seconds_ratio": 1.174,
+    "note": "both arms are generate_and_save, so both include decode and both free the DiT first",
+    "peak_gb_delta": 0.9,
+    "slots_added": 3,
+    "canvas_padding_frames": 0
+  }
+}
