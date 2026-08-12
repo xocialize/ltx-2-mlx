@@ -63,9 +63,19 @@ strict-load verified):
 - **DFR canvas layout**: `ltx_pipelines_mlx/dfr_layout.py` — segment grid, tile ranges, latent
   stitch. Pure integer geometry, so it is gated with `==` not cosine
   (`gate_ltx25_dfr_layout.py`: 399 segment lengths, 18 canvases, 72 tile partitions, all exact).
-- **Not yet ported**: the DFR *pipeline* (`dfr_pipeline.py` — rounds/tiles orchestration; the
-  layout under it is done), prompt enhancer (needs a separate generative Gemma checkpoint we do
-  not host), connector-block and DiT-forward goldens.
+- **DFR pipeline** (`ltx_pipelines_mlx/dfr.py`, `DFRPipeline.generate_dfr`): half-res base +
+  slots → spatial upsample of video AND slots → full-res detailing with slots re-appended
+  **seeded** by their upsampled stage-1 content. Costs ×1.174 time / +0.90 GB vs plain
+  distilled. ⚠️ `temporal_upsample_rounds > 0` RAISES — orchestration is ported but upstream
+  runs round tiles with `audio=None` and our `denoise_loop` requires an audio state.
+  ⚠️ `detailing_reference` defaults False (upstream gates it on an opt-in LoRA we don't host).
+  🔑 **Every new pipeline must encode the prompt and FREE Gemma BEFORE `load()`** — the 2.5 TE
+  is a bf16 12B (~24 GB) and stacking it on the 38 GB DiT nearly doubles peak. This is the
+  `1a30f74` ordering, and it was re-introduced here because the ordering lives in each
+  `generate_*` rather than a shared helper. It cost a bogus "+31 GB" C2 result.
+- **Not yet ported**: DFR temporal rounds (needs an audio-free denoise path), prompt enhancer
+  (needs a separate generative Gemma checkpoint we do not host), connector-block and
+  DiT-forward goldens.
 
 ---
 
