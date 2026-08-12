@@ -48,9 +48,24 @@ strict-load verified):
   builds need rotary + `embed_scale` buffer seeding or every state is silently zero).
   Reference venv: `scripts/setup_ltx25_ref_env.sh` (standalone torch-MPS env; the upstream
   uv.lock pins CUDA-indexed torch and cannot sync on macOS).
-- **Not yet ported**: DiffVAE decoder module (weights converted, module TBD — conv decode is
-  the working path), duration head module, keyframes/multishot + DFR APIs, connector-block
-  and DiT-forward goldens.
+- **Keyframe slots / multishot (C1)**: `conditioning/types/keyframe_slots.py` —
+  `VideoGeneratedKeyframeSlots` appends tokens the model DENOISES (unlike ordinary keyframe
+  conditioning, which appends CLEAN reference tokens), one invented keyframe per position.
+  Two things are load-bearing: the RoPE span is forced to exactly `[t, t+1)` before `/fps`
+  with `causal_fix` NOT applied, and the tokens are marked in `keyframes_mask` so they get the
+  DiT's learned keyframes embedding. CLI: `generate --distilled --num-generated-keyframes N`
+  (stage 1 only, matching upstream). ⚠️ Read slots back ONE FRAME AT A TIME — a K-frame causal
+  decode blends slots that were never temporally adjacent (`types.py:271-273`).
+  ⚠️ `LatentState` gained `keyframes_mask` + `generated_keyframe_layout`; any conditioning that
+  returns a NEW state must propagate both. Dropping them does NOT raise — the slots stay in the
+  sequence and still denoise, they just become unlocatable and lose their marking, so it reads
+  as mildly worse output. `scripts/gate_ltx25_slot_conditioning.py` exists to catch that.
+- **DFR canvas layout**: `ltx_pipelines_mlx/dfr_layout.py` — segment grid, tile ranges, latent
+  stitch. Pure integer geometry, so it is gated with `==` not cosine
+  (`gate_ltx25_dfr_layout.py`: 399 segment lengths, 18 canvases, 72 tile partitions, all exact).
+- **Not yet ported**: the DFR *pipeline* (`dfr_pipeline.py` — rounds/tiles orchestration; the
+  layout under it is done), prompt enhancer (needs a separate generative Gemma checkpoint we do
+  not host), connector-block and DiT-forward goldens.
 
 ---
 
