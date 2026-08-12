@@ -298,7 +298,7 @@ class LTXModel(nn.Module):
     def compute_gate_signal(
         self,
         video_latent: mx.array,
-        audio_latent: mx.array,
+        audio_latent: mx.array | None,
         timestep: mx.array,
         video_timesteps: mx.array | None = None,
     ) -> mx.array:
@@ -409,7 +409,12 @@ class LTXModel(nn.Module):
         # Cast inputs to bfloat16 to match weight dtype and avoid mixed-precision
         # accumulation errors over 48 transformer blocks
         video_latent = video_latent.astype(mx.bfloat16)
-        audio_latent = audio_latent.astype(mx.bfloat16)
+        # ``audio_latent is None`` = the AUDIO-FREE forward (upstream ``audio=None``).
+        # Video still runs; it just loses its A2V cross-attention contribution, exactly as
+        # upstream's ``run_a2v`` gate does. Used by DFR temporal rounds, where upstream
+        # denoises each tile video-only.
+        run_ax = audio_latent is not None
+        audio_latent = audio_latent.astype(mx.bfloat16) if run_ax else None
         if video_text_embeds is not None:
             video_text_embeds = video_text_embeds.astype(mx.bfloat16)
         if audio_text_embeds is not None:
@@ -417,7 +422,7 @@ class LTXModel(nn.Module):
 
         # Embed patches
         video_hidden = self.patchify_proj(video_latent)
-        audio_hidden = self.audio_patchify_proj(audio_latent)
+        audio_hidden = self.audio_patchify_proj(audio_latent) if run_ax else None
 
         # --- Keyframes absolute position embedding (LTX-2.5) ---
         # Applied immediately after patchify, before AdaLN / RoPE / blocks,
@@ -487,7 +492,7 @@ class LTXModel(nn.Module):
                 self.config.video_num_heads,
                 self.config.video_head_dim,
             )
-        if audio_positions is not None:
+        if run_ax and audio_positions is not None:
             audio_rope_freqs = self._compute_rope_freqs(
                 audio_positions,
                 self.config.audio_num_heads,
@@ -511,7 +516,7 @@ class LTXModel(nn.Module):
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
-        if audio_positions is not None:
+        if run_ax and audio_positions is not None:
             audio_cross_rope_freqs = self._compute_rope_freqs(
                 audio_positions[:, :, 0:1],  # temporal dimension only
                 self.config.av_cross_num_heads,
@@ -610,7 +615,7 @@ class LTXModel(nn.Module):
         video_out = self._output_block(video_hidden, video_embedded_ts, self.scale_shift_table, self.proj_out)
         audio_out = self._output_block(
             audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out
-        )
+        ) if run_ax else None
 
         return video_out, audio_out
 
@@ -689,7 +694,7 @@ class X0Model(nn.Module):
     def __call__(
         self,
         video_latent: mx.array,
-        audio_latent: mx.array,
+        audio_latent: mx.array | None,
         sigma: mx.array,
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
@@ -745,8 +750,14 @@ class X0Model(nn.Module):
         video_x0 = (video_latent.astype(mx.float32) - video_sigma * video_v.astype(mx.float32)).astype(
             video_latent.dtype
         )
-        audio_x0 = (audio_latent.astype(mx.float32) - audio_sigma * audio_v.astype(mx.float32)).astype(
-            audio_latent.dtype
+        # audio_v is None on the audio-free forward; propagate None rather than
+        # fabricating a zero tensor, so a caller that then uses it fails loudly.
+        audio_x0 = (
+            (audio_latent.astype(mx.float32) - audio_sigma * audio_v.astype(mx.float32)).astype(
+                audio_latent.dtype
+            )
+            if audio_v is not None
+            else None
         )
 
         return video_x0, audio_x0

@@ -119,7 +119,7 @@ def euler_ancestral_step(
 def denoise_loop(
     model: X0Model,
     video_state: LatentState,
-    audio_state: LatentState,
+    audio_state: LatentState | None,
     video_text_embeds: mx.array,
     audio_text_embeds: mx.array,
     sigmas: list[float] | None = None,
@@ -175,17 +175,21 @@ def denoise_loop(
     # Resolve positions: explicit params override, then fall back to state
     if video_positions is None and video_state.positions is not None:
         video_positions = video_state.positions
-    if audio_positions is None and audio_state.positions is not None:
+    # ``audio_state is None`` = the audio-free loop (upstream ``audio=None``), used by DFR
+    # temporal rounds. Every audio touch below is guarded, and the audio-PRESENT path —
+    # including the ancestral RNG draw ORDER — is left byte-identical on purpose.
+    run_a = audio_state is not None
+    if run_a and audio_positions is None and audio_state.positions is not None:
         audio_positions = audio_state.positions
 
     # Resolve attention masks from state
     if video_attention_mask is None and video_state.attention_mask is not None:
         video_attention_mask = video_state.attention_mask
-    if audio_attention_mask is None and audio_state.attention_mask is not None:
+    if run_a and audio_attention_mask is None and audio_state.attention_mask is not None:
         audio_attention_mask = audio_state.attention_mask
 
     video_x = video_state.latent
-    audio_x = audio_state.latent
+    audio_x = audio_state.latent if run_a else None
 
     # sigmas already includes the terminal value (e.g. 0.0), so iterate
     # consecutive pairs directly — no extra phantom step.
@@ -194,7 +198,7 @@ def denoise_loop(
 
     # Determine whether we need per-token timesteps (for conditioning masks).
     video_uniform = _is_uniform_mask(video_state.denoise_mask)
-    audio_uniform = _is_uniform_mask(audio_state.denoise_mask)
+    audio_uniform = _is_uniform_mask(audio_state.denoise_mask) if run_a else True
 
     _ancestral_key = [mx.random.key(noise_seed if noise_seed != -1 else 0)]
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
@@ -223,7 +227,7 @@ def denoise_loop(
         # Pass per-token timesteps when mask is not uniform
         if not video_uniform:
             call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
-        if not audio_uniform:
+        if run_a and not audio_uniform:
             call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
 
         if keyframes_mask is not None:
@@ -234,38 +238,47 @@ def denoise_loop(
 
         # Apply denoise mask: blend with clean latent
         video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
-        audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
+        if run_a:
+            audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
 
         if ancestral_eta > 0 and sigma_next != 0:
             # Ancestral step: video noise drawn before audio (upstream order).
             if noise_provider is not None:
                 v_noise = noise_provider(step_idx, "video", video_x.shape)
-                a_noise = noise_provider(step_idx, "audio", audio_x.shape)
+                a_noise = noise_provider(step_idx, "audio", audio_x.shape) if run_a else None
             else:
+                # The audio split is SKIPPED when there is no audio, so the key stream
+                # advances as it would for a video-only stage. With audio present this is
+                # byte-for-byte the previous behaviour.
                 _ank, _vk = mx.random.split(_ancestral_key[0])
-                _ank, _ak = mx.random.split(_ank)
+                _ak = None
+                if run_a:
+                    _ank, _ak = mx.random.split(_ank)
                 _ancestral_key[0] = _ank
                 v_noise = mx.random.normal(video_x.shape, key=_vk)
-                a_noise = mx.random.normal(audio_x.shape, key=_ak)
+                a_noise = mx.random.normal(audio_x.shape, key=_ak) if run_a else None
             video_x = euler_ancestral_step(
                 video_x, video_x0, sigma, sigma_next, v_noise,
                 eta=ancestral_eta, s_noise=ancestral_s_noise,
             )
-            audio_x = euler_ancestral_step(
-                audio_x, audio_x0, sigma, sigma_next, a_noise,
-                eta=ancestral_eta, s_noise=ancestral_s_noise,
-            )
+            if run_a:
+                audio_x = euler_ancestral_step(
+                    audio_x, audio_x0, sigma, sigma_next, a_noise,
+                    eta=ancestral_eta, s_noise=ancestral_s_noise,
+                )
             # Re-apply conditioning AFTER noise injection (upstream
             # post_process_latent): renoise must not corrupt clean tokens.
             video_x = apply_denoise_mask(video_x, video_state.clean_latent, video_state.denoise_mask)
-            audio_x = apply_denoise_mask(audio_x, audio_state.clean_latent, audio_state.denoise_mask)
+            if run_a:
+                audio_x = apply_denoise_mask(audio_x, audio_state.clean_latent, audio_state.denoise_mask)
         else:
             # Euler step
             video_x = euler_step(video_x, video_x0, sigma, sigma_next)
-            audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
+            if run_a:
+                audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
 
         # Force computation for memory efficiency
-        mx.async_eval(video_x, audio_x)
+        mx.async_eval(video_x, audio_x) if run_a else mx.async_eval(video_x)
 
     aggressive_cleanup()
 

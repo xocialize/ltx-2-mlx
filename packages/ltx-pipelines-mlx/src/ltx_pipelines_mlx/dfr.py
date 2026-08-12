@@ -12,7 +12,9 @@ Shape of the run:
            so the detailing pass refines them instead of inventing new ones.
   Rounds   optional temporal x2 densification, ``2**round`` keyframe-seam tiles per
            round, each tile inventing mid-segment slots and denoising with ancestral
-           Euler, then stitched on the seam latents.
+           Euler, then stitched on the seam latents. Tiles denoise VIDEO-ONLY
+           (``audio_state=None``), matching upstream — audio comes from stage 2 and
+           nothing after refines it.
 
 The canvas geometry lives in :mod:`dfr_layout` and is gated bit-exactly against
 upstream; this module is the orchestration over it.
@@ -196,20 +198,6 @@ class DFRPipeline(DistilledPipeline):
         """
         if temporal_upsample_rounds not in (0, 1, 2):
             raise ValueError(f"temporal_upsample_rounds must be 0, 1, or 2, got {temporal_upsample_rounds}")
-        if temporal_upsample_rounds > 0:
-            # STATED LIMITATION, not a silent difference. Upstream's temporal rounds run the
-            # tiles with ``audio=None`` — video-only forwards through the joint AV DiT. Our
-            # ``denoise_loop`` requires an audio modality (it dereferences audio_state
-            # unconditionally), so running rounds here would mean inventing tile-local audio
-            # semantics that upstream has no counterpart for and that no gate could check.
-            # The round ORCHESTRATION below is ported and structurally gated; what is missing
-            # is an audio-free forward path. See scripts/gate_ltx25_dfr_rounds.py.
-            raise NotImplementedError(
-                "DFR temporal_upsample_rounds > 0 needs an audio-free denoise path "
-                "(upstream runs round tiles with audio=None; our denoise_loop requires an "
-                "audio state). Stage 1 + stage 2 DFR (rounds=0) is supported."
-            )
-
         # ⚠️ ORDER IS LOAD-BEARING: encode the prompt and FREE Gemma before loading the
         # DiT. The 2.5 text encoder is a bf16 12B (~24 GB); loading it on top of the
         # 38 GB transformer nearly doubles peak. An earlier revision of this method
