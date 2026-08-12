@@ -1,6 +1,6 @@
 # Claim C2 — "diffusion fidelity rendering" (DFR)
 
-**Status: pipeline PORTED and running; cost MEASURED; quality is an operator call.**
+**Status: pipeline PORTED. Spatial detailing SUPPORTED (4/4 operator A/B). Temporal rounds DOMINATED — do not use.**
 
 Run: `uv run python scripts/measure_c2_dfr.py`
 Receipts: `docs/claims/C2-dfr-report.json`, artifacts in `.work/c2/`.
@@ -50,18 +50,24 @@ timing does.
 
 ## Quality — OPERATOR VERDICT (2026-08-12)
 
-**Spatial detailing: WORTH IT.** The operator judged the DFR arm better —
-specifically, lit windows on the lighthouse that the plain distilled arm did not
-render, and a general read of "higher quality". Directional support for the
-spatial half of C2 at ×1.279.
+**Spatial detailing: WORTH IT — 4 of 4 pairs, operator-judged.** The DFR arm was
+preferred as "more detailed" on the original pair (seed 4242, where it rendered lit
+windows on the lighthouse that plain distilled did not) **and on all three
+confirmation seeds (11, 22, 33)**.
 
-⚠️ **One pair cannot separate capability from roll.** The slot tokens divert the
-trajectory from step one, so the two arms never share a composition — "DFR has
-lights on the lighthouse" may be DFR rendering more, or may be DFR having rolled
-a different scene. If it is a capability difference it should recur across seeds.
-`scripts/measure_c2_spatial_seeds.py` runs the same A/B on seeds 11/22/33 for
-exactly that check. Status until then: **directional, n=1 pair, one seed, one
-observer, unblinded** — the same standing as the C7 verdict.
+That 4/4 is what upgrades this from a single observation to a **capability**
+result. The check mattered: the slot tokens divert the trajectory from step one,
+so the arms never share a composition, and a one-pair win is equally consistent
+with DFR having rolled a nicer scene. A lucky roll does not repeat four times in
+the same direction. Mechanism is consistent too — slots relax the effective
+temporal compression at their positions, which is exactly a *detail* lever.
+
+⚠️ **Remaining limitations, stated:** one prompt, one observer, and **unblinded**
+(the files were named `_distilled` / `_dfr`, so the arm was visible at judging
+time). The consistency is strong enough to act on, but a blinded, randomised-order
+A/B across several prompts is what would make it publishable rather than
+directional. Future A/Bs in this program should ship shuffled, opaquely-named
+files by default — it costs nothing and removes the objection up front.
 
 **Temporal rounds: NOT WORTH IT — the operator judged NATIVE better.** Combined
 with native being 2.8× cheaper for the identical deliverable, rounds are
