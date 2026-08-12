@@ -12,6 +12,48 @@ Loads pre-converted MLX weights from the [LTX-2.3 MLX collection on HuggingFace]
 
 ---
 
+## LTX-2.5 (branch `ltx-2.5`)
+
+The `ltx-2.5` branch adds **LTX-2.5** support (2026-08-11 release). Weights:
+[`mlx-community/ltx-2.5-mlx`](https://huggingface.co/mlx-community/ltx-2.5-mlx) (bf16 split
+components incl. the tuned Gemma-4 TE in-dir). Full program docs live in
+`../LTX_TESTING/LTX25-PORT-PLAN.md` + `LTX25-REFERENCE-NOTES.md` (file:line receipts against
+upstream v1.2.0); status receipts in the bridge (AB-R-0005..0007).
+
+**What differs from 2.3** (config-driven — 2.3 checkpoints are unaffected, back-compat
+strict-load verified):
+- **DiT**: `ff_bias: false` on the video stream (audio keeps bias); NEW
+  `keyframes_abs_pos_embedding` (1, 4096) applied post-patchify to `keyframes_mask`-marked
+  tokens. The target's FIRST latent frame is always marked on 2.5 (the trained embedding is
+  active — maxAbs 0.02 output effect). `LTXModel.__call__` takes `keyframes_mask`.
+- **Text encoder**: `gemma4-12b-ltx-v1` (Lightricks-tuned gemma4_unified), shipped inside the
+  model dir and loaded via mlx-lm (**requires mlx-lm with the `gemma4_unified` remap** — git
+  main as of 2026-08; release 0.31.3 lacks it). `Gemma4LanguageModel`
+  (text_encoders/gemma/encoders/gemma4_encoder.py): manual BOS (the tokenizer emits none),
+  LEFT-pad 1024, 49-state tap with the **last state post-final-norm** (HF
+  `output_hidden_states` convention — differs from the 2.3 wrapper; torch-gated).
+  `resolve_text_encoder()` picks the encoder by model dir; `blocks._PromptEncoderBlock` uses it.
+- **Sampling**: ≥ (2,5) (`scheduler.detect_model_version`) switches stage 1 to **ancestral
+  Euler** (`euler_ancestral_step`: eta 1.0, s_noise 1.0, noise seed = seed+10000, rectified
+  flow α=1−σ; conditioning re-applied AFTER renoise). Stage 2 stays plain Euler. Distilled
+  sigma tables are unchanged from 2.3.
+- **Conversion**: `scripts/convert_ltx25.py` (this repo, precedent: the pruna converter) —
+  NOT mlx-forge. Bit-gated against the 2.3 mlx-forge outputs on the byte-identical components
+  (conv VAE / audio stack / upscalers — LTX-2.5 re-ships them unchanged). ⚠️ The comfy
+  transformer files bundle the connectors, and those weights DIFFER from the diffusers
+  connectors repo — the comfy bundle is canonical (it's what ltx-pipelines loads).
+- **Parity gates**: `scripts/gate_ltx25_te.py` (tokenization identity; 49 states ≥ 0.9997;
+  pre-connector projections ≥ 0.99996) against goldens from
+  `scripts/dump_ltx25_te_golden.py` (transformers Gemma4Unified on MPS — ⚠️ meta-device
+  builds need rotary + `embed_scale` buffer seeding or every state is silently zero).
+  Reference venv: `scripts/setup_ltx25_ref_env.sh` (standalone torch-MPS env; the upstream
+  uv.lock pins CUDA-indexed torch and cannot sync on macOS).
+- **Not yet ported**: DiffVAE decoder module (weights converted, module TBD — conv decode is
+  the working path), duration head module, keyframes/multishot + DFR APIs, connector-block
+  and DiT-forward goldens.
+
+---
+
 ## Tech Stack
 
 - Python 3.11+, `uv` workspace (monorepo with `packages/*`)
