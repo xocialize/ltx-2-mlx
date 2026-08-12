@@ -402,7 +402,12 @@ class DiffusionVideoDecoder(nn.Module):
             raise NotImplementedError(
                 f"only the 1-step x0 path is ported; got model_output_type={self.model_output_type!r}"
             )
+        # remember the true content extent: ensure_min_latent_shape may pad, and
+        # the reference narrows back to content before emitting (`_crop_emit`).
+        _, _, T_in, H_in, W_in = latent.shape
         x = self.ensure_min_latent_shape(latent)
+        pad_h = max(0, self.stage_min_tile_sizes[1] - H_in) // 2
+        pad_w = max(0, self.stage_min_tile_sizes[2] - W_in) // 2
         # NATTEN last-frame border workaround: replicate the final latent frame
         x = self._resize_axis(x, 2, x.shape[2] + self.natten_trailing_pad, "repeat_last")
 
@@ -421,7 +426,13 @@ class DiffusionVideoDecoder(nn.Module):
         assert tuple(noise.shape) == pix, f"noise {noise.shape} != expected {pix}"
 
         t = mx.ones((B,), dtype=mx.float32)
-        return self.diff_step(context, noise, t, tile)
+        pixels = self.diff_step(context, noise, t, tile)
+
+        # Narrow to the requested content: T padding is repeat_last (content at
+        # the front), H/W padding is symmetric (content offset by need//2).
+        want_f = 8 * (T_in - 1) + 1
+        ph, pw = pad_h * 32, pad_w * 32
+        return pixels[:, :, :want_f, ph : ph + H_in * 32, pw : pw + W_in * 32]
 
     def decode_to_rgb(self, latent: mx.array, **kw) -> mx.array:
         """:meth:`decode` mapped to [0, 1] — the reference's ``decode_video`` tail."""
