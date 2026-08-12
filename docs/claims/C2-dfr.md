@@ -29,10 +29,33 @@ load-ordering mistake commit `1a30f74` fixed for the other pipelines. Fixed;
 re-measured at +0.90 GB. **A control arm is what turned a plausible headline
 finding into a bug report.**
 
-## Quality — deliberately not scored here
+## Quality — OPERATOR VERDICT (2026-08-12)
 
-The decoded output is coherent and well composed (a lighthouse on a headland in a
-storm, beam through rain). Beyond that this doc reports no quality verdict.
+**Spatial detailing: WORTH IT.** The operator judged the DFR arm better —
+specifically, lit windows on the lighthouse that the plain distilled arm did not
+render, and a general read of "higher quality". Directional support for the
+spatial half of C2 at ×1.279.
+
+⚠️ **One pair cannot separate capability from roll.** The slot tokens divert the
+trajectory from step one, so the two arms never share a composition — "DFR has
+lights on the lighthouse" may be DFR rendering more, or may be DFR having rolled
+a different scene. If it is a capability difference it should recur across seeds.
+`scripts/measure_c2_spatial_seeds.py` runs the same A/B on seeds 11/22/33 for
+exactly that check. Status until then: **directional, n=1 pair, one seed, one
+observer, unblinded** — the same standing as the C7 verdict.
+
+**Temporal rounds: NOT WORTH IT — the operator judged NATIVE better.** Combined
+with native being 2.8× cheaper for the identical deliverable, rounds are
+**dominated on both axes** at this clip length. Recommendation: do not use
+`temporal_upsample_rounds` for 2-second 48 fps output. The one regime that could
+still favour them is longer clips, where native high-fps generation runs out of
+sequence length — untested.
+
+Note this also settles the motion-regularity proxy against itself: it mildly
+favoured DFR (std/mean 0.143 vs 0.198) and the operator went the other way. That
+is the third time in this program a no-reference proxy has pointed opposite to
+judgement (C7 sharpness/flicker, C1 position-RMSE, now this). Treat them as
+hypothesis generators only.
 
 A no-reference gradient proxy reads DFR *lower* (0.0141 vs 0.0232 at frame 48),
 and that number is **not** evidence DFR is softer: the two arms do not share a
