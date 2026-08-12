@@ -30,9 +30,11 @@ decode would blend slots that were never temporally adjacent
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import mlx.core as mx
+import numpy as np
 
 from ltx_core_mlx.utils.positions import compute_video_positions
 
@@ -136,3 +138,56 @@ def extract_keyframes(latent: mx.array, layout: GeneratedKeyframeLayout,
         B, _, C = toks.shape
         out.append(toks.reshape(B, height, width, C).transpose(0, 3, 1, 2)[:, :, None])
     return out
+
+
+def evenly_spaced_keyframe_positions(num_keyframes: int, num_frames: int) -> list[int]:
+    """Interior pixel-frame positions for *num_keyframes* generated keyframes. Endpoints excluded.
+
+    ⚠️ Upstream is ``torch.linspace(0, num_frames - 1, num_keyframes + 2).round()``, and
+    ``torch.round`` is round-half-to-EVEN. Python's builtin ``round`` matches that, so the
+    list-comprehension form below is bit-identical — but only because both are banker's
+    rounding, not by coincidence of the arithmetic. Gated over a full sweep in
+    ``scripts/gate_ltx25_slot_positions.py``; do not "simplify" to int(x + 0.5).
+    """
+    if num_keyframes < 0:
+        raise ValueError(f"num_keyframes must be non-negative, got {num_keyframes}")
+    if num_keyframes == 0:
+        return []
+    if num_frames < num_keyframes + 2:
+        raise ValueError(
+            f"Generated keyframes need at least num_keyframes + 2 target frames, got "
+            f"num_keyframes={num_keyframes}, num_frames={num_frames}"
+        )
+    # float32 to match torch.linspace's dtype before rounding — at a .5 boundary the
+    # float32 and float64 grids can land on different sides.
+    grid = np.linspace(0, num_frames - 1, num_keyframes + 2, dtype=np.float32)
+    return [int(v) for v in np.round(grid).astype(np.int64).tolist()][1:-1]
+
+
+def has_generated_keyframes(generated_keyframes: int | Sequence[int]) -> bool:
+    """Whether a ``generated_keyframes`` request asks for any slots.
+
+    Callers must not test the argument's truthiness directly: a ``Sequence`` may be a tensor or an
+    array, whose truth value is ambiguous and raises.
+    """
+    if isinstance(generated_keyframes, int):
+        return generated_keyframes > 0
+    return len(generated_keyframes) > 0
+
+
+def resolve_generated_keyframes(generated_keyframes: int | Sequence[int], num_frames: int) -> list[int]:
+    """Normalize the pipeline-level ``generated_keyframes`` argument to pixel-frame indices.
+
+    An ``int`` requests that many evenly spaced interior keyframes; a sequence gives the target
+    pixel-frame indices explicitly. ``0`` / empty means the feature is off.
+    """
+    if isinstance(generated_keyframes, int):
+        return evenly_spaced_keyframe_positions(generated_keyframes, num_frames)
+
+    positions = sorted({int(position) for position in generated_keyframes})
+    if positions and (positions[0] < 0 or positions[-1] >= num_frames):
+        raise ValueError(
+            f"Generated keyframe positions must lie in [0, {num_frames}), got "
+            f"{sorted(int(p) for p in generated_keyframes)}"
+        )
+    return positions
