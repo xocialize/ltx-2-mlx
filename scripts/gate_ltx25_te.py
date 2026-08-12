@@ -11,9 +11,10 @@ on the identical tokens and checks:
      embed scale, dual-regime attention, k_eq_v)
   3. pre-connector projections (norm -> rescale -> aggregate_embed),
      cosine >= 0.999 vs the reference extractor+projection outputs
-
-The post-connector stage (retrained weights, 2.3-identical code) has its own
-golden TBD — this gate deliberately stops at the projection seam.
+  4. FULL connector stage (right-pad re-sort -> registers -> 8-block
+     connectors -> mask re-application), cosine >= 0.999 vs goldens from
+     upstream's own EmbeddingsProcessor.process_hidden_states
+     (scripts/dump_ltx25_connector_golden.py)
 
 Usage:
     uv run --no-sync python scripts/gate_ltx25_te.py [goldens_dir] [model_dir]
@@ -57,7 +58,7 @@ def main() -> None:
     assert (np.array(my_ids) == input_ids).all() and (np.array(my_mask) == attn).all(), (
         "tokenization diverges from the reference"
     )
-    print("[1/3] tokenization identity: PASS")
+    print("[1/4] tokenization identity: PASS")
 
     states = enc.get_all_hidden_states(mx.array(input_ids), attention_mask=mx.array(attn))
     valid = attn[0].astype(bool)
@@ -67,7 +68,7 @@ def main() -> None:
         if c < worst:
             worst, worst_i = c, i
     status = "PASS" if worst >= THRESHOLD else "FAIL"
-    print(f"[2/3] 49-state tap: worst cosine {worst:.6f} at state {worst_i}: {status}")
+    print(f"[2/4] 49-state tap: worst cosine {worst:.6f} at state {worst_i}: {status}")
     assert worst >= THRESHOLD
 
     fx = GemmaFeaturesExtractorV2()
@@ -82,8 +83,17 @@ def main() -> None:
     vc = cosine(np.array(v_pre.astype(mx.float32))[0][valid], v_gold[0][valid])
     ac = cosine(np.array(a_pre.astype(mx.float32))[0][valid], a_gold[0][valid])
     status = "PASS" if min(vc, ac) >= THRESHOLD else "FAIL"
-    print(f"[3/3] pre-connector projections: video {vc:.6f} audio {ac:.6f}: {status}")
+    print(f"[3/4] pre-connector projections: video {vc:.6f} audio {ac:.6f}: {status}")
     assert min(vc, ac) >= THRESHOLD
+
+    cv_gold = np.load(GOLDENS / "connector_video_encoding_fp32.npy")
+    ca_gold = np.load(GOLDENS / "connector_audio_encoding_fp32.npy")
+    v_emb, a_emb = fx(states, attention_mask=mx.array(attn))
+    cvc = cosine(np.array(v_emb.astype(mx.float32)), cv_gold)
+    cac = cosine(np.array(a_emb.astype(mx.float32)), ca_gold)
+    status = "PASS" if min(cvc, cac) >= THRESHOLD else "FAIL"
+    print(f"[4/4] full connector stage: video {cvc:.6f} audio {cac:.6f}: {status}")
+    assert min(cvc, cac) >= THRESHOLD
     print("TE GATE: ALL PASS")
 
 
