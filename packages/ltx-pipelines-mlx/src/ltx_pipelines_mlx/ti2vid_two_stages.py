@@ -11,6 +11,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import mlx.core as mx
@@ -24,6 +25,7 @@ from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
 )
+from ltx_core_mlx.conditioning.types.keyframe_slots import has_generated_keyframes
 from ltx_core_mlx.loader.fuse_loras import apply_loras
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
 from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
@@ -619,6 +621,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
@@ -628,6 +631,11 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         ``prompt_relay`` (a ``PromptRelayInput``) is forwarded only when set;
         ``generate_two_stage`` wires the mask into both of its denoise loops.
+
+        ``generated_keyframes`` (LTX-2.5 multishot, ``DistilledPipeline`` only)
+        is likewise forwarded only when non-zero. After the call the denoised
+        slots are on ``self.generated_keyframe_latents`` as one-frame latents,
+        with their pixel positions on ``self.generated_keyframe_positions``.
         """
         gen_kwargs: dict = dict(
             prompt=prompt,
@@ -650,6 +658,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             gen_kwargs["stage1_steps"] = stage1_steps
         if prompt_relay is not None:
             gen_kwargs["prompt_relay"] = prompt_relay
+        # Forwarded only when requested, so every pipeline that does not implement
+        # keyframe slots keeps a byte-identical call.
+        if has_generated_keyframes(generated_keyframes):
+            gen_kwargs["generated_keyframes"] = generated_keyframes
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)
 
         # Free transformer + encoder to make room for decoders

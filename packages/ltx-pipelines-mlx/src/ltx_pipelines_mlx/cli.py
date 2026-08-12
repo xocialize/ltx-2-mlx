@@ -215,6 +215,18 @@ examples:
         help="Distilled two-stage pipeline (half-res distilled + upscale + distilled refine, no CFG). Mirrors upstream DistilledPipeline.",
     )
     gen.add_argument(
+        "--num-generated-keyframes",
+        type=int,
+        default=0,
+        help=(
+            "LTX-2.5 multishot: number of extra generated keyframes placed at evenly "
+            "spaced interior frame positions (default: 0, off). Each keyframe relaxes the "
+            "effective temporal compression at its position but costs a full latent frame "
+            "of tokens while yielding one pixel frame. --distilled only; requires a "
+            "keyframe-slot checkpoint."
+        ),
+    )
+    gen.add_argument(
         "--one-stage",
         action="store_true",
         dest="one_stage",
@@ -767,6 +779,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["stage2_steps"] = args.stage2_steps
         if relay is not None:
             kwargs["prompt_relay"] = relay
+        if getattr(args, "num_generated_keyframes", 0):
+            kwargs["generated_keyframes"] = args.num_generated_keyframes
         pipe.generate_and_save(**kwargs)
 
     elif args.two_stages_hq or args.two_stage:
