@@ -70,6 +70,12 @@ class LTXModelConfig:
     positional_embedding_max_pos: tuple[int, ...] = (20, 2048, 2048)
     audio_positional_embedding_max_pos: tuple[int, ...] = (20,)
     norm_eps: float = 1e-6
+    # LTX-2.5 deltas. Defaults preserve pre-2.5 behavior: checkpoints without
+    # these config keys keep FF biases and have no keyframes embedding
+    # (matching upstream model_configurator.py:77-82).
+    ff_bias: bool = True
+    audio_ff_bias: bool = True
+    use_keyframes_abs_pos_embedding: bool = False
 
     @classmethod
     def from_checkpoint_config(cls, config: dict) -> LTXModelConfig:
@@ -117,6 +123,11 @@ class LTXModelConfig:
                 t.get("audio_positional_embedding_max_pos", d.audio_positional_embedding_max_pos)
             ),
             norm_eps=t.get("norm_eps", d.norm_eps),
+            ff_bias=t.get("ff_bias", d.ff_bias),
+            audio_ff_bias=t.get("audio_ff_bias", d.audio_ff_bias),
+            use_keyframes_abs_pos_embedding=t.get(
+                "use_keyframes_abs_pos_embedding", d.use_keyframes_abs_pos_embedding
+            ),
         )
 
     @classmethod
@@ -180,6 +191,14 @@ class LTXModel(nn.Module):
         self.patchify_proj = nn.Linear(config.video_patch_channels, vd)
         self.audio_patchify_proj = nn.Linear(config.audio_patch_channels, ad)
 
+        # --- Keyframes absolute position embedding (LTX-2.5, video only) ---
+        # (1, video_dim), zero-init upstream; added post-patchify to tokens the
+        # keyframes_mask marks (always the target's first latent frame, plus
+        # generated keyframe slots). Created only when the config enables it so
+        # pre-2.5 checkpoints load with no unused parameter.
+        if config.use_keyframes_abs_pos_embedding:
+            self.keyframes_abs_pos_embedding = mx.zeros((1, vd))
+
         # --- Output projections ---
         self.proj_out = nn.Linear(vd, config.video_patch_channels)
         self.audio_proj_out = nn.Linear(ad, config.audio_patch_channels)
@@ -215,6 +234,8 @@ class LTXModel(nn.Module):
                 av_cross_head_dim=config.av_cross_head_dim,
                 ff_mult=config.ff_mult,
                 norm_eps=config.norm_eps,
+                ff_bias=config.ff_bias,
+                audio_ff_bias=config.audio_ff_bias,
             )
             for _ in range(config.num_layers)
         ]
@@ -327,6 +348,7 @@ class LTXModel(nn.Module):
         video_cross_attention_mask: mx.array | None = None,
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
+        keyframes_mask: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
         tap: callable | None = None,
         block_stack_override: callable | None = None,
@@ -388,6 +410,15 @@ class LTXModel(nn.Module):
         # Embed patches
         video_hidden = self.patchify_proj(video_latent)
         audio_hidden = self.audio_patchify_proj(audio_latent)
+
+        # --- Keyframes absolute position embedding (LTX-2.5) ---
+        # Applied immediately after patchify, before AdaLN / RoPE / blocks,
+        # to tokens the (B, Nv, 1) keyframes_mask marks (>0). Upstream:
+        # transformer_args.py apply_keyframes_absolute_embedding.
+        kf_emb = getattr(self, "keyframes_abs_pos_embedding", None)
+        if kf_emb is not None and keyframes_mask is not None:
+            kf = (keyframes_mask > 0).astype(video_hidden.dtype)
+            video_hidden = video_hidden + kf * kf_emb.astype(video_hidden.dtype)
 
         # --- Timestep embeddings ---
         timestep = timestep.astype(mx.bfloat16)
