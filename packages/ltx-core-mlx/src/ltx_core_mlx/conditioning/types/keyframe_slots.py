@@ -125,6 +125,14 @@ def append_keyframe_slots(
     )
 
 
+def patchify_keyframes(keyframes: mx.array) -> mx.array:
+    """(B, C, K, H, W) latent -> (B, K*H*W, C) tokens. Inverse of ``extract_keyframes``."""
+    if keyframes.ndim != 5:
+        raise ValueError(f"Expected (B, C, K, H, W), got {tuple(keyframes.shape)}")
+    b, c, k, h, w = keyframes.shape
+    return keyframes.transpose(0, 2, 3, 4, 1).reshape(b, k * h * w, c)
+
+
 def extract_keyframes(latent: mx.array, layout: GeneratedKeyframeLayout,
                       height: int, width: int) -> list[mx.array]:
     """Pull each denoised slot back out as its own (B, C, 1, H, W) latent.
@@ -221,11 +229,29 @@ class VideoGeneratedKeyframeSlots:
         frame_rate: float,
         sigma: float = 1.0,
         noise_seed: int = 0,
+        initial_keyframes: mx.array | None = None,
     ):
-        self.pixel_frame_indices = tuple(int(i) for i in pixel_frame_indices)
+        indices = tuple(int(i) for i in pixel_frame_indices)
+        if not indices:
+            raise ValueError("pixel_frame_indices must be non-empty")
+        if any(i < 0 for i in indices):
+            raise ValueError(f"pixel_frame_indices must be non-negative, got {indices}")
+        if any(b <= a for a, b in zip(indices, indices[1:], strict=False)):
+            raise ValueError(f"pixel_frame_indices must be strictly increasing, got {indices}")
+        if initial_keyframes is not None:
+            if initial_keyframes.ndim != 5:
+                raise ValueError(
+                    f"initial_keyframes must have shape (B, C, K, H, W), got {tuple(initial_keyframes.shape)}"
+                )
+            if initial_keyframes.shape[2] != len(indices):
+                raise ValueError(
+                    f"initial_keyframes K={initial_keyframes.shape[2]} must match {len(indices)} pixel_frame_indices"
+                )
+        self.pixel_frame_indices = indices
         self.frame_rate = float(frame_rate)
         self.sigma = float(sigma)
         self.noise_seed = int(noise_seed)
+        self.initial_keyframes = initial_keyframes
         self.layout: GeneratedKeyframeLayout | None = None
 
     def apply(self, state: LatentState, spatial_dims: tuple[int, int, int]) -> LatentState:
@@ -245,10 +271,27 @@ class VideoGeneratedKeyframeSlots:
             width=width,
             fps=self.frame_rate,
         )
-        n_new = latent.shape[1] - state.latent.shape[1]
+        n_base = state.latent.shape[1]
+        n_new = latent.shape[1] - n_base
+        # Upstream GaussianNoiser is lerp(latent, noise, sigma) then lerp(clean, that, mask).
+        # At mask 1 that reduces to lerp(initial, noise, sigma) — so the seed content SURVIVES
+        # at small sigma (stage 2 starts slots from the upsampled stage-1 keyframes) and is
+        # fully replaced at sigma 1.0 (stage 1 starts them from pure noise). Writing
+        # `noise * sigma` instead would silently discard the seed everywhere below sigma 1.
+        initial = (
+            patchify_keyframes(self.initial_keyframes).astype(latent.dtype)
+            if self.initial_keyframes is not None
+            else mx.zeros((latent.shape[0], n_new, latent.shape[2]), dtype=latent.dtype)
+        )
+        if initial.shape[1] != n_new:
+            raise ValueError(
+                f"initial_keyframes patchify to {initial.shape[1]} tokens but the slots need {n_new}; "
+                "the seed latents are at a different spatial resolution than the target"
+            )
         mx.random.seed(self.noise_seed)
         noise = mx.random.normal((latent.shape[0], n_new, latent.shape[2])).astype(latent.dtype)
-        latent = mx.concatenate([latent[:, : state.latent.shape[1]], noise * self.sigma], axis=1)
+        slot_block = initial * (1.0 - self.sigma) + noise * self.sigma
+        latent = mx.concatenate([latent[:, :n_base], slot_block], axis=1)
 
         self.layout = layout
         return LatentState(
@@ -269,6 +312,7 @@ __all__ = [
     "evenly_spaced_keyframe_positions",
     "extract_keyframes",
     "has_generated_keyframes",
+    "patchify_keyframes",
     "resolve_generated_keyframes",
     "slot_positions",
 ]

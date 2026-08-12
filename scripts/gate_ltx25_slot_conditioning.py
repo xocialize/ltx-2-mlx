@@ -99,10 +99,14 @@ def main() -> int:
             fails.append(f"{name}: DROPPED generated_keyframe_layout")
         if after.keyframes_mask is None:
             fails.append(f"{name}: DROPPED keyframes_mask")
-        elif after.keyframes_mask.shape[1] != base.keyframes_mask.shape[1] and (
-            after.latent.shape[1] == base.latent.shape[1]
-        ):
-            fails.append(f"{name}: keyframes_mask length desynced from the token sequence")
+        elif after.keyframes_mask.shape[1] != after.latent.shape[1]:
+            # The invariant is mask length == SEQUENCE length. An earlier version of this
+            # gate only checked it when the token count was unchanged, which let the
+            # append-without-extending bug through until a real DFR run hit it.
+            fails.append(
+                f"{name}: keyframes_mask has {after.keyframes_mask.shape[1]} tokens but the "
+                f"sequence has {after.latent.shape[1]}"
+            )
     print(f"  [3/4] propagation          {len(paths)} state-rebuilding paths   "
           f"{'PASS' if len(fails) == n0 else 'FAIL'}")
 

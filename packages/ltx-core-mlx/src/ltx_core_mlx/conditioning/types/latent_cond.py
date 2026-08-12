@@ -40,6 +40,31 @@ class LatentState:
     keyframes_mask: mx.array | None = None
     generated_keyframe_layout: object | None = None
 
+    def __post_init__(self) -> None:
+        """Keep ``keyframes_mask`` the same length as the token sequence.
+
+        Conditionings that APPEND tokens propagate the incoming mask; without this it
+        stays at the old length and desyncs. Padding here rather than at each append
+        site fixes every appender at once, including ones written later.
+
+        Zero is the correct pad: an appended token is NOT a keyframe unless the item
+        that appended it says so, and the only item that marks its own tokens
+        (``VideoGeneratedKeyframeSlots``) builds a full-length mask itself.
+        """
+        mask = self.keyframes_mask
+        if mask is None:
+            return
+        n = self.latent.shape[1]
+        if mask.shape[1] == n:
+            return
+        if mask.shape[1] > n:
+            raise ValueError(
+                f"keyframes_mask has {mask.shape[1]} tokens but the latent has {n}; a mask "
+                "longer than the sequence means tokens were dropped after it was built"
+            )
+        pad = mx.zeros((mask.shape[0], n - mask.shape[1], mask.shape[2]), dtype=mask.dtype)
+        object.__setattr__(self, "keyframes_mask", mx.concatenate([mask, pad], axis=1))
+
 
 class VideoConditionByLatentIndex:
     """Replace tokens at specific frame indices with conditioning latent.
