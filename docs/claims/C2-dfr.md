@@ -13,7 +13,7 @@ Config: 512×768×97, seed 4242, LTX-2.5 bf16, both arms `generate_and_save`.
 | distilled two-stage | 52.8 s | 40.76 GB |
 | DFR (3 slots, rounds=0) | 62.0 s | 41.66 GB |
 
-**DFR costs ×1.174 time and +0.90 GB peak.** Both arms run the same distilled
+**DFR costs roughly ×1.2 time and +0.90 GB peak — and the magnitude is NOISY.** Both arms run the same distilled
 weights and the same 8+3 sigma schedule at the same resolution and seed, so the
 delta is the DFR structure itself: slots in both stages, plus the seeded
 re-append of the upsampled slots in stage 2. The canvas chose segment 32 with
@@ -28,6 +28,25 @@ identical jump, which is what proved it was not a DFR property. This is the same
 load-ordering mistake commit `1a30f74` fixed for the other pipelines. Fixed;
 re-measured at +0.90 GB. **A control arm is what turned a plausible headline
 finding into a bug report.**
+
+### ⚠️ Cost correction: one pair cannot pin the ratio
+
+Re-running the same spatial A/B on three more seeds (`measure_c2_spatial_seeds.py`,
+`docs/claims/C2-spatial-seeds.json`):
+
+| seed | distilled | DFR | ratio |
+|---|---:|---:|---:|
+| 11 | 60.2 s | 60.4 s | 1.003× |
+| 22 | 51.3 s | 63.7 s | 1.242× |
+| 33 | 56.1 s | 74.8 s | 1.333× |
+| — | — | **mean** | **1.193×** |
+
+The distilled arm alone swings 51.3–60.2 s across identical work, so the single-pair
+×1.279 headline was carrying that noise. **The direction is solid — DFR is slower in
+4 of 4 pairs — but the honest figure is "about ×1.2, high variance", not a
+three-decimal ratio.** This repo already documented ±15 s run-to-run totals; the
+lesson is that it applies to ratios too, and a ratio hides it better than a raw
+timing does.
 
 ## Quality — OPERATOR VERDICT (2026-08-12)
 
