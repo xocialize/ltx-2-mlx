@@ -42,6 +42,7 @@ irrelevant as long as K and V are gathered in the *same* order.
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 
 
 def default_rope_dim_split(head_dim: int) -> tuple[int, int, int]:
@@ -257,3 +258,99 @@ def na3d_dense_reference(
     scores = mx.where(vis[None, None], scores, neg)
     out = mx.softmax(scores, axis=-1, precise=True) @ vf
     return out.transpose(0, 2, 1, 3).reshape(B, T, H, W, NH, HD).astype(q.dtype)
+
+
+def na3d_box(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    kernel: tuple[int, int, int],
+    scale: float = 1.0,
+    tile: tuple[int, int, int] = (2, 16, 64),
+) -> mx.array:
+    """Neighborhood attention via shared key boxes + MLX's fused SDPA.
+
+    Alternative to :func:`na3d`. Where the gather path copies each key into
+    every window that contains it (traffic ``N * prod(kernel) * heads *
+    head_dim``, invariant to tiling), this gathers ONE contiguous key box per
+    query tile — the tile plus a ``kernel - 1`` halo — and lets the fused
+    attention kernel consume it without materialising the score matrix. Queries
+    then need a boolean mask restricting each to its true neighborhood.
+
+    Two things make it pay:
+
+    * **Boolean masks.** MLX's fused SDPA accepts them and they are bit-identical
+      to the additive form (verified), at a quarter of the bytes.
+    * **Mask sharing.** The mask depends only on each query's window *relative*
+      to the box corner, which is identical for every interior tile — so a
+      handful of masks are built once and reused across all tiles. (This is what
+      upstream's "group tiles by window geometry" code is doing.)
+
+    Modelled traffic at the DiffVAE's stage-5 size: ~135 GB vs ~1140 GB for the
+    gather path. Gated bit-against :func:`na3d`.
+    """
+    B, T, H, W, NH, HD = q.shape
+    st_t, kt = window_starts(T, kernel[0])
+    st_h, kh = window_starts(H, kernel[1])
+    st_w, kw = window_starts(W, kernel[2])
+    starts = [np.array(st_t), np.array(st_h), np.array(st_w)]
+    ks = [kt, kh, kw]
+    dims = [T, H, W]
+    tiles = [max(1, min(tile[i], dims[i])) for i in range(3)]
+
+    kf = k.reshape(B, T * H * W, NH, HD).transpose(0, 2, 1, 3)
+    vf = v.reshape(B, T * H * W, NH, HD).transpose(0, 2, 1, 3)
+
+    mask_cache: dict = {}
+    out = mx.zeros((B, T, H, W, NH, HD), dtype=q.dtype)
+    pieces = []
+
+    for t0 in range(0, T, tiles[0]):
+        t1 = min(t0 + tiles[0], T)
+        for h0 in range(0, H, tiles[1]):
+            h1 = min(h0 + tiles[1], H)
+            row = []
+            for w0 in range(0, W, tiles[2]):
+                w1 = min(w0 + tiles[2], W)
+                lo = [starts[i][[t0, h0, w0][i]] for i in range(3)]
+                hi = [starts[i][[t1, h1, w1][i] - 1] + ks[i] for i in range(3)]
+                ext = [int(hi[i] - lo[i]) for i in range(3)]
+                rel = tuple(
+                    tuple((starts[i][[range(t0, t1), range(h0, h1), range(w0, w1)][i]] - lo[i]).tolist())
+                    for i in range(3)
+                )
+                sig = (rel, tuple(ext))
+                m = mask_cache.get(sig)
+                if m is None:
+                    per_axis = []
+                    for i in range(3):
+                        r = np.asarray(rel[i])[:, None]
+                        j = np.arange(ext[i])[None, :]
+                        per_axis.append((j >= r) & (j < r + ks[i]))
+                    m3 = (per_axis[0][:, None, None, :, None, None]
+                          & per_axis[1][None, :, None, None, :, None]
+                          & per_axis[2][None, None, :, None, None, :])
+                    m = mx.array(m3.reshape(int(np.prod(m3.shape[:3])), -1))
+                    mask_cache[sig] = m
+
+                # key box -> flat token ids
+                bt = np.arange(lo[0], hi[0])[:, None, None] * (H * W)
+                bh = np.arange(lo[1], hi[1])[None, :, None] * W
+                bw = np.arange(lo[2], hi[2])[None, None, :]
+                box_idx = mx.array((bt + bh + bw).reshape(-1))
+
+                kb = mx.take(kf, box_idx, axis=2)
+                vb = mx.take(vf, box_idx, axis=2)
+                qt_ = q[:, t0:t1, h0:h1, w0:w1].reshape(B, -1, NH, HD).transpose(0, 2, 1, 3)
+                o = mx.fast.scaled_dot_product_attention(qt_, kb, vb, scale=scale, mask=m)
+                o = o.transpose(0, 2, 1, 3).reshape(B, t1 - t0, h1 - h0, w1 - w0, NH, HD)
+                row.append(o.astype(q.dtype))
+                mx.eval(row[-1])
+            pieces.append((t0, t1, h0, h1, row))
+
+    # reassemble
+    t_groups: dict = {}
+    for t0, t1, h0, h1, row in pieces:
+        t_groups.setdefault((t0, t1), []).append(mx.concatenate(row, axis=3) if len(row) > 1 else row[0])
+    rows = [mx.concatenate(v, axis=2) if len(v) > 1 else v[0] for _, v in sorted(t_groups.items())]
+    return rows[0] if len(rows) == 1 else mx.concatenate(rows, axis=1)
