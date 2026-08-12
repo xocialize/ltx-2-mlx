@@ -115,6 +115,7 @@ def main() -> None:
                 arr = np.array(px)[0].transpose(1, 2, 3, 0)
             n = min(len(src), arr.shape[0])
             outs[impl] = (arr[:n], el)
+            np.save(CLIPS / f"recon_{impl}_{raw.stem}.npy", arr[:n].astype(np.float32))
 
         s = src[: min(len(src), min(v[0].shape[0] for v in outs.values()))]
         row = {"clip": raw.stem[:28]}
