@@ -1,6 +1,6 @@
 """LTX-2.5 text-encoder parity gate vs torch reference goldens.
 
-Goldens are produced by ``.work/ltx25-ref/dump_te_golden.py`` (transformers
+Goldens are produced by ``scripts/dump_ltx25_te_golden.py`` (transformers
 Gemma4Unified on MPS + upstream FeatureExtractorV2 — the exact implementation
 the v1.2.0 reference wraps). This gate runs our Gemma-4 wrapper + extractor
 on the identical tokens and checks:
