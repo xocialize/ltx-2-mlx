@@ -321,7 +321,15 @@ class LTXModel(nn.Module):
         """
         del audio_latent  # signature parity with __call__; not needed for gate
         video_latent = video_latent.astype(mx.bfloat16)
-        timestep = timestep.astype(mx.bfloat16)
+        # ⚠️ Keep the timestep in fp32 through the SINUSOIDAL embedding.
+        # Rounding sigma to bf16 first shifts the embedding argument by up to
+        # ~3.4 (sigma*1000), and the high-frequency components of a sinusoidal
+        # embedding have period ~1 — so those dimensions get scrambled.
+        # Upstream computes get_timestep_embedding on the fp32 timesteps and
+        # only then runs the MLP in the model dtype. (Measured: bf16 rounding
+        # here cost up to 0.86 velocity cosine mid-trajectory, on sigmas that
+        # are not exactly representable in bf16.)
+        timestep = timestep.astype(mx.float32)
 
         video_hidden = self.patchify_proj(video_latent)
         t_emb = self._embed_timestep_scalar(timestep)
@@ -421,7 +429,15 @@ class LTXModel(nn.Module):
             video_hidden = video_hidden + kf * kf_emb.astype(video_hidden.dtype)
 
         # --- Timestep embeddings ---
-        timestep = timestep.astype(mx.bfloat16)
+        # ⚠️ Keep the timestep in fp32 through the SINUSOIDAL embedding.
+        # Rounding sigma to bf16 first shifts the embedding argument by up to
+        # ~3.4 (sigma*1000), and the high-frequency components of a sinusoidal
+        # embedding have period ~1 — so those dimensions get scrambled.
+        # Upstream computes get_timestep_embedding on the fp32 timesteps and
+        # only then runs the MLP in the model dtype. (Measured: bf16 rounding
+        # here cost up to 0.86 velocity cosine mid-trajectory, on sigmas that
+        # are not exactly representable in bf16.)
+        timestep = timestep.astype(mx.float32)
         t_emb = self._embed_timestep_scalar(timestep)
 
         # AV cross-attention gate uses a different timestep scale (default 1, not 1000).

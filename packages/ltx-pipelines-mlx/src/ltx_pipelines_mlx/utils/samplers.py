@@ -199,7 +199,11 @@ def denoise_loop(
     _ancestral_key = [mx.random.key(noise_seed if noise_seed != -1 else 0)]
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
         # Build sigma / per-token timesteps
-        sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
+        # fp32 sigma: it feeds BOTH the sinusoidal timestep embedding (whose
+        # high-frequency components have period ~1 in sigma*1000 units) and the
+        # x0 conversion. Rounding it to bf16 here cannot be recovered downstream
+        # — the model's own fp32 cast only sees the already-rounded value.
+        sigma_arr = mx.array([sigma], dtype=mx.float32)
         B = video_x.shape[0]
 
         call_kwargs: dict = dict(
@@ -805,7 +809,11 @@ def guided_denoise_loop(
             continue
 
         # Build common model kwargs
-        sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
+        # fp32 sigma: it feeds BOTH the sinusoidal timestep embedding (whose
+        # high-frequency components have period ~1 in sigma*1000 units) and the
+        # x0 conversion. Rounding it to bf16 here cannot be recovered downstream
+        # — the model's own fp32 cast only sees the already-rounded value.
+        sigma_arr = mx.array([sigma], dtype=mx.float32)
         B = video_x.shape[0]
 
         base_kwargs: dict = dict(
