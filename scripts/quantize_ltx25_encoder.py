@@ -32,7 +32,6 @@ from __future__ import annotations
 import filecmp
 import json
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -88,7 +87,7 @@ def convert_arm(arm: Arm) -> None:
         predicate = None
     else:
 
-        def predicate(path: str, module) -> bool:  # noqa: ANN001 - mlx-lm's signature
+        def predicate(path: str, module) -> bool:
             return "embed_tokens" not in path
 
     print(
