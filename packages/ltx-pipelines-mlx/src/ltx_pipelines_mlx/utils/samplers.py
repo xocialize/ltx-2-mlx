@@ -71,7 +71,6 @@ def _compute_per_token_timesteps(
     return (denoise_mask * sigma).squeeze(-1)
 
 
-
 def euler_ancestral_step(
     x: mx.array,
     x0: mx.array,
@@ -258,13 +257,23 @@ def denoise_loop(
                 v_noise = mx.random.normal(video_x.shape, key=_vk)
                 a_noise = mx.random.normal(audio_x.shape, key=_ak) if run_a else None
             video_x = euler_ancestral_step(
-                video_x, video_x0, sigma, sigma_next, v_noise,
-                eta=ancestral_eta, s_noise=ancestral_s_noise,
+                video_x,
+                video_x0,
+                sigma,
+                sigma_next,
+                v_noise,
+                eta=ancestral_eta,
+                s_noise=ancestral_s_noise,
             )
             if run_a:
                 audio_x = euler_ancestral_step(
-                    audio_x, audio_x0, sigma, sigma_next, a_noise,
-                    eta=ancestral_eta, s_noise=ancestral_s_noise,
+                    audio_x,
+                    audio_x0,
+                    sigma,
+                    sigma_next,
+                    a_noise,
+                    eta=ancestral_eta,
+                    s_noise=ancestral_s_noise,
                 )
             # Re-apply conditioning AFTER noise injection (upstream
             # post_process_latent): renoise must not corrupt clean tokens.

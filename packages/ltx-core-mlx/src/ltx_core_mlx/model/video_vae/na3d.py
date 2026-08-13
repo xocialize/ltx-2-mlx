@@ -245,8 +245,7 @@ def na3d_dense_reference(
     vw = (mx.arange(W)[None, :] >= sw[:, None]) & (mx.arange(W)[None, :] < (sw + kw)[:, None])
     del ti, hi, wi
 
-    vis = (vt[:, None, None, :, None, None] & vh[None, :, None, None, :, None]
-           & vw[None, None, :, None, None, :])
+    vis = vt[:, None, None, :, None, None] & vh[None, :, None, None, :, None] & vw[None, None, :, None, None, :]
     vis = vis.reshape(N, N)
 
     qf = q.reshape(B, N, NH, HD).transpose(0, 2, 1, 3).astype(mx.float32)
@@ -327,9 +326,11 @@ def na3d_box(
                         r = np.asarray(rel[i])[:, None]
                         j = np.arange(ext[i])[None, :]
                         per_axis.append((j >= r) & (j < r + ks[i]))
-                    m3 = (per_axis[0][:, None, None, :, None, None]
-                          & per_axis[1][None, :, None, None, :, None]
-                          & per_axis[2][None, None, :, None, None, :])
+                    m3 = (
+                        per_axis[0][:, None, None, :, None, None]
+                        & per_axis[1][None, :, None, None, :, None]
+                        & per_axis[2][None, None, :, None, None, :]
+                    )
                     m = mx.array(m3.reshape(int(np.prod(m3.shape[:3])), -1))
                     mask_cache[sig] = m
 

@@ -125,9 +125,7 @@ class LTXModelConfig:
             norm_eps=t.get("norm_eps", d.norm_eps),
             ff_bias=t.get("ff_bias", d.ff_bias),
             audio_ff_bias=t.get("audio_ff_bias", d.audio_ff_bias),
-            use_keyframes_abs_pos_embedding=t.get(
-                "use_keyframes_abs_pos_embedding", d.use_keyframes_abs_pos_embedding
-            ),
+            use_keyframes_abs_pos_embedding=t.get("use_keyframes_abs_pos_embedding", d.use_keyframes_abs_pos_embedding),
         )
 
     @classmethod
@@ -529,6 +527,12 @@ class LTXModel(nn.Module):
         block_input_a = audio_hidden
 
         if block_stack_override is not None:
+            if not run_ax:
+                raise ValueError(
+                    "block_stack_override (TeaCache) is not supported on the audio-free forward: "
+                    "the skip path reconstructs output = input + cached_residual, and a None audio "
+                    "input would either raise or return the cached residual as a bogus velocity."
+                )
             video_hidden, audio_hidden = block_stack_override(video_hidden, audio_hidden)
         else:
             num_layers = self.config.num_layers if block_provider is not None else len(self.transformer_blocks)
@@ -609,13 +613,20 @@ class LTXModel(nn.Module):
                     _mx_eval(video_hidden, audio_hidden)
 
         if tap is not None:
-            tap(video_hidden - block_input_v, audio_hidden - block_input_a)
+            # audio_hidden/block_input_a are None on the audio-free forward; report the
+            # video residual and hand the consumer None rather than computing None - None.
+            tap(
+                video_hidden - block_input_v,
+                (audio_hidden - block_input_a) if run_ax else None,
+            )
 
         # Output: AdaLN with scale_shift_table + embedded_timestep + proj
         video_out = self._output_block(video_hidden, video_embedded_ts, self.scale_shift_table, self.proj_out)
-        audio_out = self._output_block(
-            audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out
-        ) if run_ax else None
+        audio_out = (
+            self._output_block(audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out)
+            if run_ax
+            else None
+        )
 
         return video_out, audio_out
 
@@ -753,9 +764,7 @@ class X0Model(nn.Module):
         # audio_v is None on the audio-free forward; propagate None rather than
         # fabricating a zero tensor, so a caller that then uses it fails loudly.
         audio_x0 = (
-            (audio_latent.astype(mx.float32) - audio_sigma * audio_v.astype(mx.float32)).astype(
-                audio_latent.dtype
-            )
+            (audio_latent.astype(mx.float32) - audio_sigma * audio_v.astype(mx.float32)).astype(audio_latent.dtype)
             if audio_v is not None
             else None
         )

@@ -262,8 +262,17 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         # = pipeline seed + 10000) and the first-latent-frame keyframes mask
         # (the trained keyframes embedding expects it on every forward).
         is_v25 = detect_model_version(self.model_dir) >= (2, 5)
+        # ⚠️ Gate the keyframes MASK on the checkpoint capability alone, not additionally on
+        # the directory-name version parse. Slots are CREATED on
+        # `use_keyframes_abs_pos_embedding` alone (see the --num-generated-keyframes check
+        # above), so a slot-capable checkpoint in a renamed or local directory would append
+        # and denoise slot tokens that never get marked: they stay in the sequence, lose the
+        # trained embedding, and become unlocatable — a full latent frame of tokens per slot
+        # spent for nothing, with no error. `is_v25` still selects the ancestral sampler,
+        # which genuinely is a version behaviour rather than a checkpoint capability.
+        has_kf_embedding = bool(getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False))
         kf_mask_1 = None
-        if is_v25 and getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
+        if has_kf_embedding:
             from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
 
             kf_mask_1 = first_latent_frame_keyframes_mask(
@@ -299,9 +308,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             if slot_item is not None and slot_item.layout is not None
             else []
         )
-        self.generated_keyframe_positions = (
-            list(slot_item.pixel_frame_indices) if slot_item is not None else []
-        )
+        self.generated_keyframe_positions = list(slot_item.pixel_frame_indices) if slot_item is not None else []
 
         # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
@@ -374,7 +381,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
         kf_mask_2 = None
-        if is_v25 and getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
+        if has_kf_embedding:
             from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
 
             kf_mask_2 = first_latent_frame_keyframes_mask(

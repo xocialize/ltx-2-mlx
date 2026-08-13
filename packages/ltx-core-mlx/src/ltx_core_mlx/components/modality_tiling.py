@@ -347,7 +347,7 @@ class TiledLTXModel:
         video_modality = self._build_video_modality(kwargs)
 
         video_out: mx.array | None = None
-        audio_outs: list[mx.array] = []
+        audio_outs: list[mx.array] = []  # stays empty on the audio-free forward
 
         for tile in self._tiler.tiles:
             tiled_modality, ctx = self._tiler.tile_modality(video_modality, tile, normalize_positions=False)
@@ -358,13 +358,27 @@ class TiledLTXModel:
             tile_kwargs["video_attention_mask"] = tiled_modality.attention_mask
             if "video_timesteps" in kwargs and kwargs["video_timesteps"] is not None:
                 tile_kwargs["video_timesteps"] = tiled_modality.timesteps
+            # keyframes_mask is per-VIDEO-TOKEN, so it must be sliced with the tile exactly
+            # like latent/positions/timesteps. Forwarding it at full length marks the wrong
+            # tokens in every tile but the first — and on LTX-2.5 it does not even reach
+            # that: the DiT's `video_hidden + kf * kf_emb` raises a broadcast error, because
+            # the mask is (B, N_full, 1) against a (B, N_tile, D) hidden.
+            # (The Swift twin slices it at TiledDiT.swift; this is the Python mirror.)
+            kf_mask = kwargs.get("keyframes_mask")
+            if kf_mask is not None:
+                tile_kwargs["keyframes_mask"] = kf_mask[:, _bool_to_indices(ctx.keep_mask), :]
 
             tile_video_out, tile_audio_out = self._inner(**tile_kwargs)
 
             video_out = self._tiler.blend(tile_video_out, tile, ctx, output=video_out)
-            audio_outs.append(tile_audio_out)
+            if tile_audio_out is not None:
+                audio_outs.append(tile_audio_out)
 
-        if len(audio_outs) == 1:
+        # `audio_outs` is empty on the audio-free forward (LTXModel returns None for audio),
+        # which must stay None rather than reaching mx.stack([]).
+        if not audio_outs:
+            audio_out = None
+        elif len(audio_outs) == 1:
             audio_out = audio_outs[0]
         else:
             audio_out = mx.mean(mx.stack(audio_outs, axis=0), axis=0)

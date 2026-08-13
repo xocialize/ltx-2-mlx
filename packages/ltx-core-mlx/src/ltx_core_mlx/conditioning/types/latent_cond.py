@@ -122,7 +122,7 @@ class VideoConditionByLatentIndex:
             denoise_mask=new_mask,
             positions=state.positions,
             attention_mask=state.attention_mask,
-                    keyframes_mask=state.keyframes_mask,
+            keyframes_mask=state.keyframes_mask,
             generated_keyframe_layout=state.generated_keyframe_layout,
         )
 

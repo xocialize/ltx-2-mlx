@@ -226,14 +226,17 @@ class VideoDecoder:
 
         choice = os.environ.get("LTX2_VAE_DECODER", "conv").lower()
         if choice not in ("conv", "diffusion", "diffvae"):
-            print(f"[vae-decoder: unknown LTX2_VAE_DECODER={choice!r}, using conv]",
-                  file=sys.stderr, flush=True)
+            print(f"[vae-decoder: unknown LTX2_VAE_DECODER={choice!r}, using conv]", file=sys.stderr, flush=True)
             return False
         if choice == "conv":
             return False
         if not (self.model_dir / "vae_diffusion_decoder.safetensors").exists():
-            print("[vae-decoder: diffusion requested but vae_diffusion_decoder.safetensors "
-                  "is absent — falling back to conv]", file=sys.stderr, flush=True)
+            print(
+                "[vae-decoder: diffusion requested but vae_diffusion_decoder.safetensors "
+                "is absent — falling back to conv]",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
         return True
 
@@ -318,8 +321,20 @@ def _write_frames_and_mux(
 
     _, _, F, H, W = pixels.shape
     cmd = [
-        find_ffmpeg(), "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(frame_rate), "-i", "-",
+        find_ffmpeg(),
+        "-y",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        f"{W}x{H}",
+        "-pix_fmt",
+        "rgb24",
+        "-r",
+        str(frame_rate),
+        "-i",
+        "-",
     ]
     if audio_path:
         cmd.extend(["-i", audio_path, "-c:a", "aac"])

@@ -276,9 +276,15 @@ class BasicAVTransformerBlock(nn.Module):
 
         if run_ax:
             (
-                a_shift_sa, a_scale_sa, a_gate_sa,
-                a_shift_ff, a_scale_ff, a_gate_ff,
-                a_shift_ca, a_scale_ca, a_gate_ca,
+                a_shift_sa,
+                a_scale_sa,
+                a_gate_sa,
+                a_shift_ff,
+                a_scale_ff,
+                a_gate_ff,
+                a_shift_ca,
+                a_scale_ca,
+                a_gate_ca,
             ) = self._unpack_adaln(audio_adaln_params, self.audio_scale_shift_table, 9, adim)
 
         # AV cross-attn tables: 4 scale/shift params + 1 gate per side

@@ -99,9 +99,7 @@ def append_keyframe_slots(
     n_new = tokens_per * len(pixel_frame_indices)
 
     slots = mx.zeros((B, n_new, C), dtype=latent.dtype)
-    slot_pos = mx.concatenate(
-        [slot_positions(t, height, width, fps) for t in pixel_frame_indices], axis=1
-    )
+    slot_pos = mx.concatenate([slot_positions(t, height, width, fps) for t in pixel_frame_indices], axis=1)
     if slot_pos.shape[0] != B:
         slot_pos = mx.broadcast_to(slot_pos, (B, n_new, slot_pos.shape[-1]))
 
@@ -133,8 +131,7 @@ def patchify_keyframes(keyframes: mx.array) -> mx.array:
     return keyframes.transpose(0, 2, 3, 4, 1).reshape(b, k * h * w, c)
 
 
-def extract_keyframes(latent: mx.array, layout: GeneratedKeyframeLayout,
-                      height: int, width: int) -> list[mx.array]:
+def extract_keyframes(latent: mx.array, layout: GeneratedKeyframeLayout, height: int, width: int) -> list[mx.array]:
     """Pull each denoised slot back out as its own (B, C, 1, H, W) latent.
 
     One latent per slot, deliberately: they must be decoded as standalone
@@ -256,9 +253,7 @@ class VideoGeneratedKeyframeSlots:
 
     def apply(self, state: LatentState, spatial_dims: tuple[int, int, int]) -> LatentState:
         if state.generated_keyframe_layout is not None:
-            raise ValueError(
-                "Generated keyframe slots were already applied to this state; use a single item"
-            )
+            raise ValueError("Generated keyframe slots were already applied to this state; use a single item")
         _f, height, width = spatial_dims
         latent, denoise_mask, positions, clean_latent, keyframes_mask, layout = append_keyframe_slots(
             latent=state.latent,

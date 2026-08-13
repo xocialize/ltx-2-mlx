@@ -130,8 +130,7 @@ class NAAttention(nn.Module):
         if _na_impl() == "box":
             out = na3d_box(q, k, v, self.kernel, scale=1.0, tile=(2, 32, 96))
         else:
-            out = na3d(q, k, v, self.kernel, scale=1.0,
-                       query_tile_t=tile[0], query_tile_h=tile[1])
+            out = na3d(q, k, v, self.kernel, scale=1.0, query_tile_t=tile[0], query_tile_h=tile[1])
         return out.reshape(B, T, H, W, C)
 
 
@@ -153,8 +152,7 @@ class NABlock(nn.Module):
 class DiffusionNABlock(nn.Module):
     """Stage-5 block: context injection + modulated attn + modulated SwiGLU."""
 
-    def __init__(self, dim: int, kernel: tuple[int, int, int], context_channels: int,
-                 head_dim: int = 64):
+    def __init__(self, dim: int, kernel: tuple[int, int, int], context_channels: int, head_dim: int = 64):
         super().__init__()
         self.context_proj = nn.Linear(context_channels, dim)
         self.scale_shift_table = mx.zeros((7, dim))
@@ -168,8 +166,7 @@ class DiffusionNABlock(nn.Module):
         eff = [shared[i] + self.scale_shift_table[i].reshape(1, 1, 1, 1, -1) for i in range(7)]
         return eff[0], eff[1], eff[3], eff[4]
 
-    def __call__(self, x: mx.array, context: mx.array, shared: list[mx.array],
-                 tile=(None, None)) -> mx.array:
+    def __call__(self, x: mx.array, context: mx.array, shared: list[mx.array], tile=(None, None)) -> mx.array:
         s_msa, sh_msa, s_mlp, sh_mlp = self.modulation(shared)
         x = x + self.context_proj(context)  # every block re-injects
         h = self.norm1(x) * (1.0 + s_msa) + sh_msa
@@ -300,19 +297,16 @@ class DiffusionVideoDecoder(nn.Module):
         }
         self.conv_in = nn.Linear(in_channels, stage_channels[0])
         self.det_stages = [
-            [NABlock(stage_channels[i], stage_kernels[i], head_dim) for _ in range(stage_depths[i])]
-            for i in range(4)
+            [NABlock(stage_channels[i], stage_kernels[i], head_dim) for _ in range(stage_depths[i])] for i in range(4)
         ]
         self.upsamples = [
-            LinearPixelShuffleUpsample(stage_channels[i], upsample_strides[i], upsample_reductions[i])
-            for i in range(4)
+            LinearPixelShuffleUpsample(stage_channels[i], upsample_strides[i], upsample_reductions[i]) for i in range(4)
         ]
         self.t_embedder = _TimestepEmbedder(256, t_emb_dim)
         self.conv_in_x_t = nn.Linear(out_channels * patch_size * patch_size, c5)
         self.shared_adaln = _AdaLNZero(t_emb_dim, c5)
         self.diff_blocks = [
-            DiffusionNABlock(c5, self.stage5_kernel, self.context_channels, head_dim)
-            for _ in range(stage_depths[4])
+            DiffusionNABlock(c5, self.stage5_kernel, self.context_channels, head_dim) for _ in range(stage_depths[4])
         ]
         # geometry constants derived from the stage config (dvd.py:115-159)
         self.temporal_scale = math.prod(st[0] for st in upsample_strides)
@@ -342,8 +336,7 @@ class DiffusionVideoDecoder(nn.Module):
             mx.eval(x)
         return x
 
-    def diff_step(self, context: mx.array, x_t: mx.array, t: mx.array,
-                  tile=(None, None)) -> mx.array:
+    def diff_step(self, context: mx.array, x_t: mx.array, t: mx.array, tile=(None, None)) -> mx.array:
         """Stage 5: noised pixels + context -> pixels (channels-first, [-1,1])."""
         patched = patchify_hw(x_t, self.patch_size)
         x = self.conv_in_x_t(patched.transpose(0, 2, 3, 4, 1))

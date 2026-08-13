@@ -163,9 +163,7 @@ class DFRPipeline(DistilledPipeline):
         """
         if not getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
             return None
-        mask = first_latent_frame_keyframes_mask(
-            state.latent.shape[1], tokens_per_frame, batch=state.latent.shape[0]
-        )
+        mask = first_latent_frame_keyframes_mask(state.latent.shape[1], tokens_per_frame, batch=state.latent.shape[0])
         if state.keyframes_mask is not None:
             mask = mx.maximum(mask, state.keyframes_mask.astype(mask.dtype))
         return mask
@@ -213,6 +211,21 @@ class DFRPipeline(DistilledPipeline):
             self.prompt_encoder.free()
             aggressive_cleanup()
 
+        # Accepted by the inherited constructor but implemented by neither generate_dfr nor
+        # its generate_and_save. Silently ignoring them is the worst outcome: the caller OOMs
+        # at exactly the size where they asked for the mitigation. Refuse instead.
+        if getattr(self, "_tile_count", None) is not None:
+            raise NotImplementedError(
+                "DFR does not implement modality tiling (--tile-frames/--tile-spatial): "
+                "generate_dfr drives the DiT directly and never wraps it in TiledLTXModel. "
+                "Use the distilled two-stage pipeline for tiled runs."
+            )
+        if getattr(self, "low_ram_streaming", False):
+            raise NotImplementedError(
+                "DFR does not implement block streaming (--low-ram): generate_dfr never "
+                "attaches a block_provider, so the flag would be silently inert."
+            )
+
         self.load()
         if not getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
             raise ValueError(
@@ -237,9 +250,7 @@ class DFRPipeline(DistilledPipeline):
         x0_model = X0Model(self.dit)
 
         # --- Stage 1: half-res base + keyframe slots ---------------------------------
-        slot_item_1 = VideoGeneratedKeyframeSlots(
-            positions, frame_rate=frame_rate, sigma=1.0, noise_seed=seed + 20000
-        )
+        slot_item_1 = VideoGeneratedKeyframeSlots(positions, frame_rate=frame_rate, sigma=1.0, noise_seed=seed + 20000)
         video_state = create_noised_state(
             base_shape=(1, F * H1 * W1, 128),
             conditionings=[slot_item_1],
@@ -334,9 +345,7 @@ class DFRPipeline(DistilledPipeline):
 
         n_base_2 = F * H2 * W2
         carry_positions = list(positions)
-        carry_keyframes = mx.concatenate(
-            extract_keyframes(out_2.video_latent, slot_item_2.layout, H2, W2), axis=2
-        )
+        carry_keyframes = mx.concatenate(extract_keyframes(out_2.video_latent, slot_item_2.layout, H2, W2), axis=2)
         video_latent = self.video_patchifier.unpatchify(out_2.video_latent[:, :n_base_2, :], (F, H2, W2))
         # Return the audio in latent form (B, 8, T, 16), like every other pipeline —
         # the decoder unpacks that shape, not the (B, T, 128) token form.
@@ -378,9 +387,7 @@ class DFRPipeline(DistilledPipeline):
                         round_conditionings.append(
                             VideoConditionByKeyframeIndex(
                                 frame_idx=local,
-                                keyframe_latent=self.video_patchifier.patchify(
-                                    anchor_keyframes[:, :, i : i + 1]
-                                )[0],
+                                keyframe_latent=self.video_patchifier.patchify(anchor_keyframes[:, :, i : i + 1])[0],
                                 spatial_dims=(Ft, H2, W2),
                                 frame_rate=cond_fps,
                                 strength=_ANCHOR_KEYFRAME_STRENGTH,
@@ -425,16 +432,12 @@ class DFRPipeline(DistilledPipeline):
                         noise_seed=seed + 1000 * round_idx + tile_index,
                     )
                 tile_latents.append(
-                    self.video_patchifier.unpatchify(
-                        tile_out.video_latent[:, : Ft * H2 * W2, :], (Ft, H2, W2)
-                    )
+                    self.video_patchifier.unpatchify(tile_out.video_latent[:, : Ft * H2 * W2, :], (Ft, H2, W2))
                 )
                 if slot_item_r is not None:
                     slot_positions_r.extend(slot_global)
                     slot_slices.append(
-                        mx.concatenate(
-                            extract_keyframes(tile_out.video_latent, slot_item_r.layout, H2, W2), axis=2
-                        )
+                        mx.concatenate(extract_keyframes(tile_out.video_latent, slot_item_r.layout, H2, W2), axis=2)
                     )
                 aggressive_cleanup()
 
@@ -465,15 +468,29 @@ class DFRPipeline(DistilledPipeline):
         if target_frames != num_frames:
             keep = (target_frames - 1) // TEMPORAL_SCALE + 1
             video_latent = video_latent[:, :, :keep]
+            # ⚠️ Audio was generated for the PADDED canvas (n_audio is computed after
+            # resolve_canvas overwrites num_frames), so it must be cut to the delivered
+            # video or the muxed clip outlasts the picture — utils/blocks.py writes with
+            # no `-shortest`. Measured before this trim: -f 9 pads to a 25-frame canvas,
+            # giving 1.04 s of audio over 0.375 s of video. Upstream cuts the same way
+            # (dfr_pipeline.py:555-558).
+            audio_keep = compute_audio_token_count(target_frames, frame_rate)
+            if audio_latent is not None and audio_keep < audio_latent.shape[2]:
+                audio_latent = audio_latent[:, :, :audio_keep, :]
 
-        self.generated_keyframe_latents = [
-            carry_keyframes[:, :, i : i + 1] for i in range(carry_keyframes.shape[2])
-        ]
-        self.generated_keyframe_positions = list(carry_positions)
-        self.dfr_canvas = {"segment": segment, "canvas_frames": num_frames,
-                           "requested_frames": requested_frames, "slot_positions": list(positions)}
+        # Only keyframes inside the delivered clip are reported. carry_positions spans the
+        # padded canvas, so an unfiltered list names stills that do not exist in the output
+        # (num_frames=9 would report a keyframe at pixel frame 24 of a 9-frame video).
+        kept = [i for i, pos in enumerate(carry_positions) if pos < target_frames]
+        self.generated_keyframe_latents = [carry_keyframes[:, :, i : i + 1] for i in kept]
+        self.generated_keyframe_positions = [int(carry_positions[i]) for i in kept]
+        self.dfr_canvas = {
+            "segment": segment,
+            "canvas_frames": num_frames,
+            "requested_frames": requested_frames,
+            "slot_positions": list(positions),
+        }
         return video_latent, audio_latent
-
 
     def generate_and_save(self, prompt: str, output_path: str, **kwargs) -> str:
         """Generate with DFR and save, freeing the DiT before the decoders load.
@@ -485,9 +502,7 @@ class DFRPipeline(DistilledPipeline):
         """
         frame_rate = kwargs.pop("frame_rate")
         rounds = kwargs.get("temporal_upsample_rounds", 0)
-        video_latent, audio_latent = self.generate_dfr(
-            prompt=prompt, frame_rate=frame_rate, **kwargs
-        )
+        video_latent, audio_latent = self.generate_dfr(prompt=prompt, frame_rate=frame_rate, **kwargs)
         # ⚠️ PLAYBACK fps is the conditioning fps times 2**rounds. Each round doubles the
         # temporal sample count for the SAME motion, so muxing at the base rate writes a
         # 2x/4x slow-motion clip with the right frames — wrong duration, and silently so.
@@ -503,9 +518,15 @@ class DFRPipeline(DistilledPipeline):
             self._loaded = False
             aggressive_cleanup()
         self._load_decoders()
-        result = self._decode_and_save_video(
-            video_latent, audio_latent, output_path, frame_rate=playback_fps
-        )
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=playback_fps)
+        # Free the decoders too, matching the parent (ti2vid_two_stages.py). Without this a
+        # SECOND generate_and_save on the same instance re-enters load() and stacks the
+        # ~38 GB DiT on top of still-resident decoders. aggressive_cleanup() alone does not
+        # drop the references.
+        if self.low_memory:
+            self.vae_decoder = None
+            self.audio_decoder = None
+            self.vocoder = None
         aggressive_cleanup()
         return result
 

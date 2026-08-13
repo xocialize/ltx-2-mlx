@@ -78,7 +78,7 @@ class AudioConditionByReferenceLatent:
             denoise_mask=new_mask,
             positions=new_positions,
             attention_mask=new_attn_mask,
-                    keyframes_mask=state.keyframes_mask,
+            keyframes_mask=state.keyframes_mask,
             generated_keyframe_layout=state.generated_keyframe_layout,
         )
 
