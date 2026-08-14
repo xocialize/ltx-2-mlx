@@ -12,7 +12,20 @@ Loads pre-converted MLX weights from the [LTX-2.3 MLX collection on HuggingFace]
 
 ---
 
-## LTX-2.5 (branch `ltx-2.5`)
+## 🔑 LTX-2.5 IS PRIMARY (2026-08-13) — branch `ltx-2.5`
+
+Default to 2.5 for new work. The port is COMPLETE: DiT deltas, Gemma-4 TE, DiffVAE, duration
+head, keyframe slots, and the DFR pipeline with temporal rounds — all gated. All seven vendor
+claims measured (`docs/claims/`, `../LTX_TESTING/LTX25-PORT-PLAN.md`).
+
+2.3 remains a working fallback and the control arm for comparisons; every 2.5 change is
+CHECKPOINT-driven (config flags, in-dir encoder detection) rather than version-switched, so
+2.3 paths are byte-identical. Do not start new feature work on 2.3.
+
+⚠️ Everything below this section that is not marked 2.5 was written for 2.3. Doctrine
+transfers; NUMBERS generally do not.
+
+### LTX-2.5 details
 
 The `ltx-2.5` branch adds **LTX-2.5** support (2026-08-11 release). Weights:
 [`mlx-community/ltx-2.5-mlx`](https://huggingface.co/mlx-community/ltx-2.5-mlx) (bf16 split
