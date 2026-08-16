@@ -65,7 +65,15 @@ class GemmaLanguageModel(nn.Module):
 
         tokens = self._tokenizer.encode(text.strip())
         if len(tokens) > max_length:
-            tokens = tokens[-max_length:]  # Keep last tokens (left-pad = truncate from left)
+            # Keep the FIRST max_length tokens. Corrected 2026-08-16 (AB-T-0059): this previously
+            # kept the LAST, which is WRONG against the vendor. Lightricks/LTX-2 v1.2.0
+            # ltx_core/text_encoders/gemma/tokenizer.py:31-63 truncates via
+            # `tokenizer(truncation=True, max_length=...)` and then re-clips `[bos, *ids][:max_length]`
+            # -- both keep the FRONT. The vendor sets padding_side explicitly but never
+            # truncation_side, and the Gemma-4 tokenizer_config.json does not set it either, so HF's
+            # default applies. MEASURED on the real checkpoint: tokenizer.truncation_side == "right",
+            # and a >1024-token probe with distinct head/tail markers kept the head, dropped the tail.
+            tokens = tokens[:max_length]
 
         # Left-pad to max_length using the native pad token
         pad_length = max_length - len(tokens)
