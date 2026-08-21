@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ltx-core-mlx"
 version = "0.14.19"
 description = "LTX-2.3 model library ported to MLX for Apple Silicon"
-readme = "../../README.md"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "dgrauet" }]
@@ -25,7 +25,11 @@ classifiers = [
 dependencies = [
     "mlx>=0.31.0",
     "mlx-arsenal>=0.2.4",
-    "mlx-lm>=0.31.0",
+    # ⚠️ 0.31.2 is a HARD floor, not a preference: LTX-2.5's text encoder is a
+    # `gemma4_unified` checkpoint loaded through `mlx_lm.load`, and gemma4 first
+    # shipped in mlx-lm v0.31.2. On 0.31.0/0.31.1 the model type is simply
+    # unknown and 2.5 fails at load with "Model type gemma4_unified not supported".
+    "mlx-lm>=0.31.2",
     "safetensors>=0.4.0",
     "huggingface-hub>=0.26.0",
     "numpy>=1.26.0",

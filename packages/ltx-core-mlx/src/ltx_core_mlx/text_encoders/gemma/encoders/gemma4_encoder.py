@@ -33,15 +33,33 @@ from .base_encoder import GemmaLanguageModel
 class Gemma4LanguageModel(GemmaLanguageModel):
     """LTX-2.5 Gemma-4-unified wrapper (encode-only).
 
-    Loads via ``mlx_lm.load`` (requires mlx-lm with the ``gemma4_unified``
-    model-type remapping). The unified checkpoint cannot generate usefully —
+    Loads via ``mlx_lm.load``. The unified checkpoint cannot generate usefully —
     prompt enhancement needs a separate generative Gemma checkpoint, matching
     upstream's ``--prompt-enhancer-gemma-root``.
+
+    ⚠️ **The checkpoint declares ``model_type: gemma4_unified``; released mlx-lm registers
+    it as ``gemma4``.** Upstream added a ``MODEL_REMAPPING`` entry for this, but it is NOT
+    in any release (absent from v0.31.2 and v0.31.3, present only on ``main``). Rather than
+    require an unreleased dependency, ``load`` remaps it here via ``model_config`` — so 2.5
+    works on plain ``pip install mlx-lm``. Remove this once a release carries the mapping.
     """
 
     #: HF convention: the last hidden state in ``output_hidden_states`` is
     #: post-final-norm. Overridable for golden-diff experiments.
     final_norm_last_state: bool = True
+
+    def load(self, model_path: str | None = None) -> None:
+        """Load with ``gemma4_unified`` remapped to mlx-lm's ``gemma4``.
+
+        See the class docstring: the remapping exists upstream but is unreleased, so we
+        supply it ourselves instead of pinning a git dependency.
+        """
+        from mlx_lm import load as mlx_lm_load
+
+        path = model_path or self._model_path
+        if path is None:
+            raise ValueError("model_path must be provided")
+        self._model, self._tokenizer = mlx_lm_load(path, model_config={"model_type": "gemma4"})
 
     def tokenize(self, text: str, max_length: int = 1024) -> tuple[mx.array, mx.array]:
         """Tokenize with a manual BOS and LEFT padding to ``max_length``.
@@ -55,10 +73,18 @@ class Gemma4LanguageModel(GemmaLanguageModel):
 
         bos_id = getattr(self._tokenizer, "bos_token_id", None) or 2
         tokens = self._tokenizer.encode(text.strip())
-        if not tokens or tokens[0] != bos_id:
-            tokens = [bos_id, *tokens]
+        # ⚠️ Truncate from the FRONT (keep the head), then prepend BOS, then re-clip —
+        # the same order the vendor uses and the same order `base_encoder` uses.
+        #
+        # 🔑 This override is WHY the earlier fix missed 2.5. `base_encoder.tokenize` was
+        # corrected to `tokens[:max_length]`, but this subclass overrides `tokenize`
+        # wholesale and kept `tokens[-max_length:]` — so the fix landed on 2.3's path and
+        # left 2.5's, the generation it was actually written for. A base-class fix does not
+        # reach a subclass that overrides the method.
         if len(tokens) > max_length:
-            tokens = tokens[-max_length:]
+            tokens = tokens[:max_length]
+        if not tokens or tokens[0] != bos_id:
+            tokens = [bos_id, *tokens][:max_length]
 
         pad_id = self._tokenizer.pad_token_id if self._tokenizer.pad_token_id is not None else 0
         pad_length = max_length - len(tokens)
