@@ -330,7 +330,14 @@ class TestLTXModelGateSignal:
         assert gate.shape == (B, Nv, 32)
 
     def test_gate_signal_matches_inline_block0_modulation(self):
-        """The gate must equal block 0's video_normed during a real forward."""
+        """The gate must equal block 0's video_normed during a real forward.
+
+        ⚠️ The timestep goes into the SINUSOIDAL embedding in fp32, not bf16.
+        This replication used to cast to bf16 to mirror the implementation, and
+        when the implementation was fixed the test kept asserting the bug — a
+        test written by copying the code pins whatever the code did. 0.7 is not
+        exactly representable in bf16, so it discriminates between the two.
+        """
         model = LTXModel(self._tiny_config())
         B, Nv, Na = 1, 4, 2
         video_latent = mx.random.normal((B, Nv, 128))
@@ -341,12 +348,24 @@ class TestLTXModelGateSignal:
 
         # Replicate the prelude manually and call block 0's helper.
         v_hidden = model.patchify_proj(video_latent.astype(mx.bfloat16))
-        t_emb = model._embed_timestep_scalar(timestep.astype(mx.bfloat16))
+        t_emb = model._embed_timestep_scalar(timestep.astype(mx.float32))
         video_adaln_emb, _ = model.adaln_single(t_emb)
         ref = model.transformer_blocks[0].compute_video_normed_sa(v_hidden, video_adaln_emb)
 
         mx.synchronize()
         assert mx.allclose(gate, ref, atol=1e-5).item()
+
+        # Guard the fix itself: a bf16 timestep must NOT reproduce the gate,
+        # otherwise this test would silently pass again if the cast regressed.
+        t_emb_bf16 = model._embed_timestep_scalar(timestep.astype(mx.bfloat16))
+        adaln_bf16, _ = model.adaln_single(t_emb_bf16)
+        wrong = model.transformer_blocks[0].compute_video_normed_sa(v_hidden, adaln_bf16)
+        mx.synchronize()
+        assert not mx.allclose(gate, wrong, atol=1e-5).item(), (
+            "bf16 and fp32 timestep embeddings agree here, so this test cannot "
+            "detect a regression of the sigma-rounding fix — pick a sigma that "
+            "is not exactly representable in bf16"
+        )
 
 
 class TestLTXModelHooks:

@@ -100,3 +100,21 @@ def sigma_to_timestep(sigma: float) -> mx.array:
         Timestep as (1,) array.
     """
     return mx.array([sigma], dtype=mx.bfloat16)
+
+
+def detect_model_version(model_dir) -> tuple[int, int]:
+    """Read (major, minor) from the converted checkpoint's config.json.
+
+    Mirrors upstream ``detect_model_version``: LTX-2.5 gates the ancestral
+    stage-1 sampler and the keyframes embedding on version >= (2, 5).
+    Missing/parse failures return (2, 3) — pre-2.5 behavior.
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        cfg = json.loads((Path(model_dir) / "config.json").read_text())
+        parts = str(cfg.get("model_version", "2.3.0")).split(".")
+        return int(parts[0]), int(parts[1])
+    except Exception:
+        return (2, 3)

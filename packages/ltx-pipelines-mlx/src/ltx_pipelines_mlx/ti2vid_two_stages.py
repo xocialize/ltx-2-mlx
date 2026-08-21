@@ -11,6 +11,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import mlx.core as mx
@@ -20,7 +21,11 @@ from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
     create_multimodal_guider_factory,
 )
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
+from ltx_core_mlx.conditioning.types.keyframe_slots import has_generated_keyframes
 from ltx_core_mlx.loader.fuse_loras import apply_loras
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
 from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
@@ -186,7 +191,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
           Slower per bind but supports arbitrary LoRA strength.
         """
         from ltx_core_mlx.loader.block_streaming import BlockLoraSource, BlockStreamer
-        from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+        from ltx_core_mlx.loader.sd_ops import (
+            LTXV_LORA_BLOCK_PREFIX,
+            LTXV_LORA_COMFY_RENAMING_MAP,
+        )
 
         if abs(self._distilled_lora_strength - 1.0) <= 1e-6:
             distilled_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
@@ -214,7 +222,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             )
         lora_source = BlockLoraSource(
             lora_path,
-            block_prefix="transformer.transformer_blocks.",
+            block_prefix=LTXV_LORA_BLOCK_PREFIX,
             strength=self._distilled_lora_strength,
             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
         )
@@ -313,6 +321,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         stg_scale: float = 1.0,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
@@ -347,8 +356,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
-        # --- Text encoding ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        # --- Text encoding (Prompt Relay: encode the combined prompt; the negative
+        # prompt is a fixed default, so it is unaffected by the local prompts) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        num_text_tokens = video_embeds.shape[1]
+        relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 
         # --- Load DiT + VAE encoder + upsampler ---
         if self.dit is None:
@@ -363,6 +376,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         assert self.upsampler is not None
 
         # --- Stage 1: Half resolution with CFG ---
+        # Snap to the two-stage grid (multiples of 64) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=True)
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
@@ -472,6 +487,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas_1,
+            video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             teacache=teacache_controller,
             tap=tap,
         )
@@ -573,6 +589,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -603,12 +620,22 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
+        prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
         ``stage1_steps`` defaults to ``None`` so subclasses can apply
         their own default (Euler: 30, HQ res_2s: 15) without being
         overridden by this parent method's signature.
+
+        ``prompt_relay`` (a ``PromptRelayInput``) is forwarded only when set;
+        ``generate_two_stage`` wires the mask into both of its denoise loops.
+
+        ``generated_keyframes`` (LTX-2.5 multishot, ``DistilledPipeline`` only)
+        is likewise forwarded only when non-zero. After the call the denoised
+        slots are on ``self.generated_keyframe_latents`` as one-frame latents,
+        with their pixel positions on ``self.generated_keyframe_positions``.
         """
         gen_kwargs: dict = dict(
             prompt=prompt,
@@ -629,6 +656,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         )
         if stage1_steps is not None:
             gen_kwargs["stage1_steps"] = stage1_steps
+        if prompt_relay is not None:
+            gen_kwargs["prompt_relay"] = prompt_relay
+        # Forwarded only when requested, so every pipeline that does not implement
+        # keyframe slots keeps a byte-identical call.
+        if has_generated_keyframes(generated_keyframes):
+            gen_kwargs["generated_keyframes"] = generated_keyframes
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)
 
         # Free transformer + encoder to make room for decoders

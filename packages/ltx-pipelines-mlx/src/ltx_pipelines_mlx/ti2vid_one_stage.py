@@ -32,7 +32,10 @@ from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
     create_multimodal_guider_factory,
 )
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -114,6 +117,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         stg_scale: float = 1.0,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         tap: callable | None = None,
@@ -139,8 +143,12 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at target resolution.
         """
-        # --- Text encoding (positive + negative for CFG) ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        # --- Text encoding (positive + negative for CFG; Prompt Relay encodes the
+        # combined prompt on the positive side) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        num_text_tokens = video_embeds.shape[1]
+        relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 
         # --- Load dev DiT + VAE encoder ---
         self.load()
@@ -148,6 +156,8 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         assert self.vae_encoder is not None
 
         # --- Single stage at full target resolution ---
+        # Snap to the single-stage grid (multiples of 32) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=False)
         F, H, W = compute_video_latent_shape(num_frames, height, width)
         video_shape = (1, F * H * W, 128)
         audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
@@ -246,6 +256,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas,
+            video_cross_attention_mask=relay_mask(F, H, W, video_state.latent.shape[1]),
             tap=tap,
         )
         if self.low_memory:
@@ -273,6 +284,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         stg_scale: float = 1.0,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         **_unused_kwargs,
@@ -295,6 +307,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             stg_scale=stg_scale,
             image=image,
             images=images,
+            prompt_relay=prompt_relay,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,
         )

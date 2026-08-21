@@ -1,0 +1,61 @@
+{
+  "prompt": "A lone lighthouse on a rocky headland during a storm, waves exploding against the rocks, the beam sweeping through sheets of rain. Cinematic, high contrast, 35mm.",
+  "config": {
+    "out": ".work/c2seeds",
+    "seeds": [
+      11,
+      22,
+      33
+    ],
+    "height": 512,
+    "width": 768,
+    "frames": 97,
+    "frame_rate": 24.0
+  },
+  "pairs": {
+    "11": {
+      "distilled": {
+        "seconds": 60.2,
+        "peak_gb": 40.76,
+        "output": "seed11_distilled.mp4"
+      },
+      "dfr": {
+        "seconds": 60.4,
+        "peak_gb": 41.66,
+        "output": "seed11_dfr.mp4"
+      },
+      "ratio": 1.003
+    },
+    "22": {
+      "distilled": {
+        "seconds": 51.3,
+        "peak_gb": 40.76,
+        "output": "seed22_distilled.mp4"
+      },
+      "dfr": {
+        "seconds": 63.7,
+        "peak_gb": 41.66,
+        "output": "seed22_dfr.mp4"
+      },
+      "ratio": 1.242
+    },
+    "33": {
+      "distilled": {
+        "seconds": 56.1,
+        "peak_gb": 40.76,
+        "output": "seed33_distilled.mp4"
+      },
+      "dfr": {
+        "seconds": 74.8,
+        "peak_gb": 41.66,
+        "output": "seed33_dfr.mp4"
+      },
+      "ratio": 1.333
+    }
+  },
+  "ratio_mean": 1.193,
+  "ratio_range": [
+    1.003,
+    1.333
+  ]
+}

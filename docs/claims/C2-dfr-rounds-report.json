@@ -1,0 +1,72 @@
+{
+  "prompt": "A lone lighthouse on a rocky headland during a storm, waves exploding against the rocks, the beam sweeping through sheets of rain. Cinematic, high contrast, 35mm.",
+  "target_frames": 97,
+  "config": {
+    "out": ".work/c2r",
+    "height": 512,
+    "width": 768,
+    "seed": 4242,
+    "frame_rate": 24.0
+  },
+  "arms": {
+    "distilled_native": {
+      "seconds": 50.2,
+      "peak_gb": 40.76,
+      "requested_frames": 97,
+      "rounds": null,
+      "playback_fps": 24.0,
+      "output": "distilled_native.mp4",
+      "actual_frames": 97,
+      "frames_ok": true
+    },
+    "dfr_rounds0": {
+      "seconds": 64.2,
+      "peak_gb": 41.66,
+      "requested_frames": 97,
+      "rounds": 0,
+      "playback_fps": 24.0,
+      "output": "dfr_rounds0.mp4",
+      "actual_frames": 97,
+      "frames_ok": true
+    },
+    "dfr_rounds1": {
+      "seconds": 138.9,
+      "peak_gb": 44.37,
+      "requested_frames": 49,
+      "rounds": 1,
+      "playback_fps": 48.0,
+      "output": "dfr_rounds1.mp4",
+      "actual_frames": 97,
+      "frames_ok": true
+    },
+    "dfr_rounds2": {
+      "seconds": 177.8,
+      "peak_gb": 44.37,
+      "requested_frames": 25,
+      "rounds": 2,
+      "playback_fps": 96.0,
+      "output": "dfr_rounds2.mp4",
+      "actual_frames": 97,
+      "frames_ok": true
+    }
+  },
+  "comparison": {
+    "distilled_native": {
+      "vs_native_seconds_ratio": 1.0,
+      "peak_gb_delta": 0.0
+    },
+    "dfr_rounds0": {
+      "vs_native_seconds_ratio": 1.279,
+      "peak_gb_delta": 0.9
+    },
+    "dfr_rounds1": {
+      "vs_native_seconds_ratio": 2.767,
+      "peak_gb_delta": 3.61
+    },
+    "dfr_rounds2": {
+      "vs_native_seconds_ratio": 3.542,
+      "peak_gb_delta": 3.61
+    }
+  },
+  "all_arms_emitted_target_frames": true
+}

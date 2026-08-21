@@ -90,8 +90,12 @@ class PromptEncoder:
     def load(self) -> None:
         """Load Gemma + connector if not already loaded."""
         if self._text_encoder is None:
-            self._text_encoder = GemmaLanguageModel()
-            self._text_encoder.load(self.gemma_model_id)
+            from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import resolve_text_encoder
+
+            # LTX-2.5 conversions ship the tuned Gemma-4 TE in-dir
+            # (gemma4-12b-ltx-v1/); 2.3 uses the external Gemma-3 id.
+            self._text_encoder = resolve_text_encoder(self.model_dir, self.gemma_model_id)
+            self._text_encoder.load()
             aggressive_cleanup()
 
         if self._feature_extractor is None:
@@ -206,14 +210,60 @@ class VideoDecoder:
     def __init__(self, model_dir: str | Path, verbose: bool = True) -> None:
         self.model_dir = _resolve_model_dir(model_dir)
         self.verbose = verbose
-        self._decoder: _VideoVAEDecoder | None = None
+        self._decoder = None
+        self._is_diffvae = False
 
-    def load(self) -> _VideoVAEDecoder:
+    def _use_diffvae(self) -> bool:
+        """LTX-2.5 DiffVAE selection.
+
+        ``LTX2_VAE_DECODER=diffusion|conv`` (mirrors the 2.3 ``pruna|stock``
+        lever). Default is ``conv``: the DiffVAE is the *quality* tier and is
+        materially heavier, so it is opt-in. Falls back to conv with a note if
+        the weights are absent, so a stale model dir degrades loudly-but-safely
+        rather than crashing.
+        """
+        import os
+
+        choice = os.environ.get("LTX2_VAE_DECODER", "conv").lower()
+        if choice not in ("conv", "diffusion", "diffvae"):
+            print(f"[vae-decoder: unknown LTX2_VAE_DECODER={choice!r}, using conv]", file=sys.stderr, flush=True)
+            return False
+        if choice == "conv":
+            return False
+        if not (self.model_dir / "vae_diffusion_decoder.safetensors").exists():
+            print(
+                "[vae-decoder: diffusion requested but vae_diffusion_decoder.safetensors "
+                "is absent — falling back to conv]",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        return True
+
+    def load(self):
         if self._decoder is not None:
+            return self._decoder
+        if self._use_diffvae():
+            from ltx_core_mlx.model.video_vae.diffusion_video_decoder import (
+                DiffusionVideoDecoder,
+            )
+
+            dec = DiffusionVideoDecoder()
+            weights = load_split_safetensors(
+                self.model_dir / "vae_diffusion_decoder.safetensors",
+                prefix="vae_diffusion_decoder.",
+            )
+            dec.load_weights([(k, v.astype(mx.float32)) for k, v in weights.items()], strict=True)
+            self._decoder = dec
+            self._is_diffvae = True
+            if self.verbose:
+                print("[vae-decoder: DiffVAE (1-step x0)]", file=sys.stderr, flush=True)
+            aggressive_cleanup()
             return self._decoder
         self._decoder = _VideoVAEDecoder()
         weights = load_split_safetensors(self.model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
         self._decoder.load_weights(list(weights.items()))
+        self._is_diffvae = False
         aggressive_cleanup()
         return self._decoder
 
@@ -239,8 +289,72 @@ class VideoDecoder:
                     flush=True,
                 )
         decoder = self.load()
+        if self._is_diffvae:
+            # DiffVAE decodes the whole clip in one 1-step x0 pass (it has no
+            # streaming/chunked path yet), then reuses the conv decoder's
+            # frame-writer for muxing.
+            pixels = decoder.decode_to_rgb(video_latent, tile=(1, 8))  # smaller tiles measured faster
+            mx.eval(pixels)
+            _write_frames_and_mux(pixels, output_path, frame_rate=frame_rate, audio_path=audio_path)
+            return output_path
         decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path)
         return output_path
+
+
+def _write_frames_and_mux(
+    pixels: mx.array,
+    output_path: str,
+    frame_rate: float = 24.0,
+    audio_path: str | None = None,
+) -> None:
+    """Write ``(B, 3, F, H, W)`` RGB pixels in [0, 1] to mp4, muxing audio.
+
+    Used by the DiffVAE path, which decodes a whole clip in one 1-step x0 pass
+    instead of streaming chunks. Encoder settings mirror the conv decoder's
+    streaming writer (libx264, yuv420p, crf 18, no ``-shortest``).
+    """
+    import subprocess
+
+    import numpy as np
+
+    from ltx_core_mlx.utils.ffmpeg import find_ffmpeg
+
+    _, _, F, H, W = pixels.shape
+    cmd = [
+        find_ffmpeg(),
+        "-y",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        f"{W}x{H}",
+        "-pix_fmt",
+        "rgb24",
+        "-r",
+        str(frame_rate),
+        "-i",
+        "-",
+    ]
+    if audio_path:
+        cmd.extend(["-i", audio_path, "-c:a", "aac"])
+    cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    try:
+        for i in range(F):
+            frame = pixels[:, :, i, :, :][0].transpose(1, 2, 0)  # (H, W, 3), [0,1]
+            buf = (np.array(mx.clip(frame, 0.0, 1.0)) * 255.0).round().astype(np.uint8)
+            proc.stdin.write(buf.tobytes())
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        proc.wait()
 
 
 class AudioDecoder:

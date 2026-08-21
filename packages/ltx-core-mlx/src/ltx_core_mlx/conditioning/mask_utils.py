@@ -156,3 +156,24 @@ def update_attention_mask(
         num_existing_tokens=latent_state.latent.shape[1],
         cross_mask=cross_mask,
     )
+
+
+def first_latent_frame_keyframes_mask(
+    total_tokens: int,
+    tokens_per_latent_frame: int,
+    batch: int = 1,
+) -> mx.array:
+    """(B, N, 1) keyframes mask marking the target's FIRST latent frame.
+
+    LTX-2.5: the causal video encoder makes latent frame 0 cover a single
+    pixel frame, so upstream marks it with the keyframes absolute position
+    embedding unconditionally (tools.py _first_frame_keyframes_mask).
+    Appended conditioning tokens (indices >= the target grid) stay 0 —
+    ordinary keyframe conditioning is NOT marked; only generated keyframe
+    slots are (handled by the slots API, not here).
+    """
+    import mlx.core as mx
+
+    mask = mx.zeros((batch, total_tokens, 1))
+    ones = mx.ones((batch, tokens_per_latent_frame, 1))
+    return mx.concatenate([ones, mask[:, tokens_per_latent_frame:, :]], axis=1)

@@ -1,0 +1,66 @@
+{
+  "_pre_registered": "2026-08-12, before any C4 generation. Checklists are fixed; scoring must not add, drop or reword elements after seeing output.",
+  "_design": "Length-degradation curve: ONE scene, progressively extended. If the Gemma-4 TE 'holds complex prompts together instead of dropping details across a longer sequence', 2.5's adherence should decay more slowly than 2.3's as element count rises.",
+  "_note": "System-level test: TE and DiT are both retrained, so this measures the pair. Stated in the report.",
+  "levels": [
+    {
+      "n": 5,
+      "prompt": "A woman in a red coat walks through a snowy forest at dusk, carrying a lantern.",
+      "elements": [
+        "a woman is visible",
+        "she is wearing a red coat",
+        "the setting is a forest",
+        "there is snow",
+        "she is carrying a lantern"
+      ]
+    },
+    {
+      "n": 12,
+      "prompt": "A woman in a red coat with a fur collar walks left to right through a snowy pine forest at dusk, carrying a glowing brass lantern in her right hand. Her breath fogs in the cold air. Falling snow drifts past the camera, which tracks alongside her at waist height. Warm lantern light contrasts with the blue twilight.",
+      "elements": [
+        "a woman is visible",
+        "she is wearing a red coat",
+        "the coat has a fur collar",
+        "the setting is a pine forest",
+        "there is snow on the ground",
+        "she is carrying a lantern",
+        "the lantern is glowing",
+        "the lantern appears brass or golden",
+        "snow is falling through the air",
+        "the lighting is dusk or twilight, blue-toned",
+        "there is warm light on her from the lantern",
+        "the camera is positioned low, around waist height"
+      ]
+    },
+    {
+      "n": 24,
+      "prompt": "A woman in a red wool coat with a fur collar and black gloves walks left to right through a dense snowy pine forest at dusk, carrying a glowing brass lantern in her right hand. She wears a grey knitted scarf and leather boots. Her breath fogs in the cold air and her cheeks are flushed. Falling snow drifts past the camera, which tracks alongside her at waist height with a shallow depth of field, the background trees softly blurred. Warm golden lantern light rims her face and coat, contrasting with the deep blue twilight behind. Footprints trail behind her in fresh powder. A frozen stream runs through the background. Bare branches arch overhead. The mood is quiet and cinematic, shot on film with visible grain.",
+      "elements": [
+        "a woman is visible",
+        "she is wearing a red coat",
+        "the coat has a fur collar",
+        "she is wearing gloves",
+        "she is wearing a scarf",
+        "she is wearing boots",
+        "the setting is a pine forest",
+        "the forest is dense with many trees",
+        "there is snow on the ground",
+        "she is carrying a lantern",
+        "the lantern is glowing",
+        "the lantern appears brass or golden",
+        "snow is falling through the air",
+        "the lighting is dusk or twilight, blue-toned",
+        "there is warm golden light on her face or coat",
+        "the camera is positioned low, around waist height",
+        "the background is blurred with shallow depth of field",
+        "footprints are visible in the snow",
+        "a stream or water is visible in the background",
+        "bare branches are visible overhead",
+        "her breath is visible as fog",
+        "the image looks cinematic",
+        "the image has visible film grain",
+        "the overall mood is quiet and still"
+      ]
+    }
+  ]
+}

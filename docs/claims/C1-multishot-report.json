@@ -1,0 +1,91 @@
+{
+  "prompt": "Shot 1: a wide establishing shot of a fog-covered harbour at dawn, fishing boats at anchor. Shot 2: a close-up of a weathered fisherman's hands coiling wet rope. Shot 3: a low-angle shot of gulls lifting off a wooden piling against a grey sky. Cinematic, 35mm film grain, muted cool colour grade.",
+  "config": {
+    "out": ".work/c1",
+    "height": 512,
+    "width": 768,
+    "frames": 97,
+    "keyframes": 3,
+    "seed": 4242,
+    "frame_rate": 24.0
+  },
+  "arms": {
+    "baseline_0": {
+      "seconds": 49.4,
+      "peak_gb": 40.76,
+      "num_generated_keyframes": 0,
+      "keyframes": [],
+      "slot_positions": []
+    },
+    "slots_3": {
+      "seconds": 54.7,
+      "peak_gb": 40.76,
+      "num_generated_keyframes": 3,
+      "keyframes": [
+        {
+          "index": 0,
+          "pixel_frame": 24,
+          "file": "slots_3_kf00_f0024.png",
+          "mean": 0.4264,
+          "std": 0.19,
+          "grad": 0.02045,
+          "rmse_vs_video_same_frame": 0.0676,
+          "rmse_vs_video_other_frame": 0.0743,
+          "slot_resolution": [
+            384,
+            256
+          ]
+        },
+        {
+          "index": 1,
+          "pixel_frame": 48,
+          "file": "slots_3_kf01_f0048.png",
+          "mean": 0.4294,
+          "std": 0.1879,
+          "grad": 0.01898,
+          "rmse_vs_video_same_frame": 0.0721,
+          "rmse_vs_video_other_frame": 0.0661,
+          "slot_resolution": [
+            384,
+            256
+          ]
+        },
+        {
+          "index": 2,
+          "pixel_frame": 72,
+          "file": "slots_3_kf02_f0072.png",
+          "mean": 0.4324,
+          "std": 0.1888,
+          "grad": 0.01953,
+          "rmse_vs_video_same_frame": 0.0627,
+          "rmse_vs_video_other_frame": 0.0823,
+          "slot_resolution": [
+            384,
+            256
+          ]
+        }
+      ],
+      "slot_positions": [
+        24,
+        48,
+        72
+      ]
+    }
+  },
+  "distinctness_rmse": {
+    "kf0_vs_kf1": 0.0636,
+    "kf0_vs_kf2": 0.0683,
+    "kf1_vs_kf2": 0.0581
+  },
+  "distinctness_min": 0.0581,
+  "cost": {
+    "seconds_delta": 5.3,
+    "seconds_ratio": 1.107,
+    "peak_gb_delta": 0.0
+  },
+  "slot_video_alignment": {
+    "aligned": 2,
+    "of": 3,
+    "note": "each slot is closer to the video frame at ITS OWN position than to another position's frame"
+  }
+}

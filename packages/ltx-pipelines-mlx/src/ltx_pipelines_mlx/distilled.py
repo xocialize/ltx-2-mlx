@@ -21,9 +21,20 @@ For dev model + CFG quality, see :class:`TI2VidTwoStagesPipeline` /
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import mlx.core as mx
 
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
+from ltx_core_mlx.conditioning.types.keyframe_slots import (
+    VideoGeneratedKeyframeSlots,
+    extract_keyframes,
+    has_generated_keyframes,
+    resolve_generated_keyframes,
+)
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -32,7 +43,7 @@ from ltx_core_mlx.utils.positions import (
     compute_video_positions,
 )
 
-from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
+from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, detect_model_version
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
 from .utils.progress import phase
@@ -117,6 +128,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         stage2_steps: int | None = None,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using the distilled two-stage pipeline.
@@ -137,14 +150,22 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
+        # --- Prompt Relay setup (temporal prompt gating on video cross-attn) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+
         # --- Text encoding (positive only — no CFG) ---
         self._load_text_encoder()
         with phase("Encoding prompt", verbose=self.verbose):
-            video_embeds, audio_embeds = self._encode_text(prompt)
+            video_embeds, audio_embeds = self._encode_text(encode_prompt)
             _materialize(video_embeds, audio_embeds)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
+
+        # Per-stage Prompt Relay mask builder. Ranges were computed pre-encode;
+        # the mask is rebuilt each stage because tokens-per-frame (H*W) differs.
+        num_text_tokens = video_embeds.shape[1]
+        relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 
         # --- Load distilled DiT + VAE encoder + upsampler ---
         self.load()
@@ -153,6 +174,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         assert self.upsampler is not None
 
         # --- Stage 1: half resolution ---
+        # Snap to the two-stage grid (multiples of 64) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=True)
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
@@ -182,6 +205,25 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=frame_rate,
             )
+
+        # LTX-2.5 multishot: generated keyframe SLOTS. Unlike image conditioning
+        # these tokens are denoised — the model invents a standalone keyframe at
+        # each position — so they are appended as a conditioning item and read
+        # back after the loop. Stage 1 only, matching upstream distilled.py.
+        slot_item = None
+        if has_generated_keyframes(generated_keyframes):
+            if not getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False):
+                raise ValueError(
+                    "generated_keyframes requires a keyframe-slot checkpoint "
+                    "(transformer config use_keyframes_abs_pos_embedding); this model has none"
+                )
+            slot_item = VideoGeneratedKeyframeSlots(
+                resolve_generated_keyframes(generated_keyframes, num_frames),
+                frame_rate=frame_rate,
+                sigma=1.0,
+                noise_seed=seed + 20000,
+            )
+            conditionings_1 = [*conditionings_1, slot_item]
 
         video_state = create_noised_state(
             base_shape=video_shape,
@@ -215,6 +257,32 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         x0_model = X0Model(stage1_dit)
 
+        # --- LTX-2.5 sampling deltas (upstream distilled.py:60-84 + tools.py) ---
+        # >= (2,5): ancestral Euler stage 1 (eta=1.0, s_noise=1.0, noise seed
+        # = pipeline seed + 10000) and the first-latent-frame keyframes mask
+        # (the trained keyframes embedding expects it on every forward).
+        is_v25 = detect_model_version(self.model_dir) >= (2, 5)
+        # ⚠️ Gate the keyframes MASK on the checkpoint capability alone, not additionally on
+        # the directory-name version parse. Slots are CREATED on
+        # `use_keyframes_abs_pos_embedding` alone (see the --num-generated-keyframes check
+        # above), so a slot-capable checkpoint in a renamed or local directory would append
+        # and denoise slot tokens that never get marked: they stay in the sequence, lose the
+        # trained embedding, and become unlocatable — a full latent frame of tokens per slot
+        # spent for nothing, with no error. `is_v25` still selects the ancestral sampler,
+        # which genuinely is a version behaviour rather than a checkpoint capability.
+        has_kf_embedding = bool(getattr(self.dit.config, "use_keyframes_abs_pos_embedding", False))
+        kf_mask_1 = None
+        if has_kf_embedding:
+            from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
+
+            kf_mask_1 = first_latent_frame_keyframes_mask(
+                video_state.latent.shape[1], H_half * W_half, batch=video_state.latent.shape[0]
+            )
+            # Slots carry the marker too — the state's own mask already has them,
+            # so union the two rather than letting the frame-0 helper overwrite it.
+            if video_state.keyframes_mask is not None:
+                kf_mask_1 = mx.maximum(kf_mask_1, video_state.keyframes_mask.astype(kf_mask_1.dtype))
+
         self._pre_denoise_flush(video_state, audio_state)
         output_1 = denoise_loop(
             model=x0_model,
@@ -223,11 +291,25 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_1,
+            video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
+            keyframes_mask=kf_mask_1,
+            ancestral_eta=1.0 if is_v25 else 0.0,
+            noise_seed=seed + 10000,
         )
         if self.low_memory:
             aggressive_cleanup()
 
         # --- Upscale (same denorm/upsample/renorm as TI2VidTwoStagesPipeline) ---
+        # Read generated keyframes back BEFORE the strip below discards their tokens.
+        # ⚠️ One frame at a time, deliberately: a K-frame causal decode would blend
+        # slots that were never temporally adjacent (upstream types.py:271-273).
+        self.generated_keyframe_latents = (
+            extract_keyframes(output_1.video_latent, slot_item.layout, H_half, W_half)
+            if slot_item is not None and slot_item.layout is not None
+            else []
+        )
+        self.generated_keyframe_positions = list(slot_item.pixel_frame_indices) if slot_item is not None else []
+
         # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
@@ -298,6 +380,14 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             tiler_2 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_full, W_full))
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
+        kf_mask_2 = None
+        if has_kf_embedding:
+            from ltx_core_mlx.conditioning.mask_utils import first_latent_frame_keyframes_mask
+
+            kf_mask_2 = first_latent_frame_keyframes_mask(
+                video_state_2.latent.shape[1], H_full * W_full, batch=video_state_2.latent.shape[0]
+            )
+
         self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=stage2_x0_model,
@@ -306,6 +396,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
+            keyframes_mask=kf_mask_2,
         )
         if self.low_memory:
             aggressive_cleanup()

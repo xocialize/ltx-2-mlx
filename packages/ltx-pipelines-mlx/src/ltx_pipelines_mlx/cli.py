@@ -40,32 +40,6 @@ def _add_base_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
 
 
-def _legacy_single_image(images, *, mode_label: str) -> str | None:
-    """Reduce a list of ImageConditioningInput to a single legacy path.
-
-    one-stage and distilled pipelines accept only the legacy ``image=path``
-    (frame_idx=0, strength=1.0). Multi-anchor I2V is a two-stage / HQ
-    feature. Errors out clearly if the user passed >1 anchor or a non-
-    trivial frame_idx/strength on these modes.
-    """
-    if not images:
-        return None
-    if len(images) > 1:
-        raise SystemExit(
-            f"{mode_label}: multi-image I2V (>1 --image) requires --two-stage "
-            "or --two-stages-hq. The single-stage / distilled paths only "
-            "support a single legacy anchor."
-        )
-    img = images[0]
-    if img.frame_idx != 0 or img.strength != 1.0:
-        raise SystemExit(
-            f"{mode_label}: --image FRAME_IDX/STRENGTH overrides require "
-            "--two-stage or --two-stages-hq. Got "
-            f"frame_idx={img.frame_idx}, strength={img.strength}."
-        )
-    return img.path
-
-
 def _build_tile_count_config(args: argparse.Namespace):
     """Return a TileCountConfig from --tile-frames / --tile-spatial / --tile-overlap.
 
@@ -188,9 +162,40 @@ examples:
             "PATH alone defaults to FRAME_IDX=0 STRENGTH=1.0 (legacy single-image I2V). "
             "Repeatable to anchor multiple frames (e.g. --image foo.jpg 0 1.0 "
             "--image foo.jpg 96 1.0 to anchor both ends and preserve identity). "
-            "FRAME_IDX is the target latent frame index; 0 replaces, others guide via "
-            "VideoConditionByKeyframeIndex. Mirrors upstream LTX_2_3 --image."
+            "FRAME_IDX is the pixel frame index (0-based); 0 replaces the first latent "
+            "frame directly, others guide via VideoConditionByKeyframeIndex. "
+            "Mirrors upstream LTX_2_3 --image."
         ),
+    )
+    from ltx_pipelines_mlx.utils.args import SegmentAction as _SegmentAction
+
+    gen.add_argument(
+        "--segment",
+        action=_SegmentAction,
+        nargs="+",
+        dest="segments",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Prompt Relay segment: a local prompt gated to a slice of the timeline. "
+            "Form: TEXT [LEN_FRAMES] (LEN_FRAMES in latent frames; omit to auto-distribute "
+            "evenly). Repeatable, in timeline order — e.g. --segment 'a red car' "
+            "--segment 'a blue sky'. The global --prompt applies to all frames. "
+            "Works on all generate modes (video cross-attention); on CFG modes the mask "
+            "applies to the conditional pass only. Not compatible with modality tiling."
+        ),
+    )
+    gen.add_argument(
+        "--relay-epsilon",
+        type=float,
+        default=1e-3,
+        help="Prompt Relay falloff (smaller = sharper temporal gating). Default: 1e-3.",
+    )
+    gen.add_argument(
+        "--relay-strength",
+        type=float,
+        default=1.0,
+        help="Prompt Relay penalty multiplier (higher = stricter segment isolation). Default: 1.0.",
     )
     gen.add_argument("--steps", type=int, default=None, help="Denoising steps for one-stage (default: 8)")
     gen.add_argument(
@@ -208,6 +213,18 @@ examples:
         "--distilled",
         action="store_true",
         help="Distilled two-stage pipeline (half-res distilled + upscale + distilled refine, no CFG). Mirrors upstream DistilledPipeline.",
+    )
+    gen.add_argument(
+        "--num-generated-keyframes",
+        type=int,
+        default=0,
+        help=(
+            "LTX-2.5 multishot: number of extra generated keyframes placed at evenly "
+            "spaced interior frame positions (default: 0, off). Each keyframe relaxes the "
+            "effective temporal compression at its position but costs a full latent frame "
+            "of tokens while yielding one pixel frame. --distilled only; requires a "
+            "keyframe-slot checkpoint."
+        ),
     )
     gen.add_argument(
         "--one-stage",
@@ -393,6 +410,62 @@ examples:
         help="IC-LoRA conditioning attention strength 0.0-1.0 (default: 1.0)",
     )
     ic.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
+    ic.add_argument(
+        "--upsample-only",
+        action="store_true",
+        help=(
+            "Half-res generative pass (control applied throughout) + 2x latent "
+            "upsample, then decode directly at full resolution — skips the Stage 2 "
+            "refine that drops control adherence. ~3x faster than --single-stage; "
+            "control fidelity sits between two-stage and native single-stage."
+        ),
+    )
+    ic.add_argument(
+        "--refine-steps",
+        type=int,
+        default=None,
+        help=(
+            "With --upsample-only, run an N-step control-aware refine after the "
+            "upsample: re-encodes the control at full resolution and re-applies it "
+            "with the IC-LoRA fused, cleaning upsampler artifacts without the "
+            "adherence drift of two-stage. 3 ~ matches the standard Stage 2 depth; "
+            "higher = more cleanup + more drift from the draft (capped at 8)."
+        ),
+    )
+    ic.add_argument(
+        "--single-stage",
+        action="store_true",
+        help=(
+            "Single-stage full-resolution generation with the reference conditioning "
+            "applied throughout (Comfy Union Control topology). No upsampler / Stage 2. "
+            "Tracks the control signal more tightly than two-stage; slower at large res."
+        ),
+    )
+
+    ic.add_argument(
+        "--dev-transformer",
+        default=None,
+        help=(
+            "Dev (non-distilled) transformer filename. Enables dev mode: the "
+            "distilled LoRA is fused alongside the IC-LoRA (Comfy IC-LoRA recipe). "
+            "e.g. transformer.safetensors in a dev model dir"
+        ),
+    )
+
+    ic.add_argument(
+        "--distilled-lora",
+        default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        help=(
+            "Distilled LoRA fused alongside the IC-LoRA in dev mode "
+            "(default: ltx-2.3-22b-distilled-lora-384-1.1.safetensors)"
+        ),
+    )
+    ic.add_argument(
+        "--distilled-lora-strength",
+        type=float,
+        default=0.5,
+        help="Distilled LoRA strength in dev mode (default: 0.5)",
+    )
 
     # --- lipdub ---
     ld = sub.add_parser(
@@ -580,7 +653,19 @@ examples:
         "preprocess": _cmd_preprocess,
         "slice": _cmd_slice,
     }
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except RuntimeError as e:
+        # #75: the macOS GPU watchdog kills sustained GPU work with a cryptic
+        # Metal error; explain it and point at the mitigations. Never set the
+        # driver env var on the user's behalf — the trade-off is theirs.
+        from ltx_pipelines_mlx.utils.watchdog import watchdog_hint
+
+        hint = watchdog_hint(e)
+        if hint is None:
+            raise
+        print(f"\nerror: {e}\n\n{hint}", file=sys.stderr)
+        sys.exit(1)
 
 
 # =============================================================================
@@ -595,6 +680,20 @@ def _cmd_generate(args: argparse.Namespace) -> None:
     prompt = _maybe_enhance_prompt(args)
 
     lora_paths = [(path, float(strength)) for path, strength in args.lora] if args.lora else []
+
+    # Prompt Relay (temporal prompt gating) — applies to every generate mode. Pass the
+    # (possibly mixed) list when any beat is pinned; None entries auto-fill downstream.
+    relay = None
+    if getattr(args, "segments", None):
+        from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+
+        specified = [s.length for s in args.segments]
+        relay = PromptRelayInput(
+            local_prompts=[s.text for s in args.segments],
+            segment_lengths=specified if any(length is not None for length in specified) else None,
+            epsilon=args.relay_epsilon,
+            strength=args.relay_strength,
+        )
 
     if args.enable_teacache and not (args.two_stages_hq or args.two_stage):
         raise SystemExit(
@@ -624,12 +723,6 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.verbose = not args.quiet
         if lora_paths:
             pipe._pending_loras = lora_paths
-        # one-stage accepts only a single legacy `image=path` (frame_idx=0,
-        # strength=1.0). Multi-anchor is unsupported here — would require
-        # the same combined_image_conditionings refactor as the two-stage
-        # paths. For now, error out if the user passed >1 anchor or a
-        # non-trivial strength/frame_idx.
-        legacy_image = _legacy_single_image(args.images, mode_label="--one-stage")
         kwargs: dict = dict(
             prompt=prompt,
             output_path=args.output,
@@ -638,7 +731,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             num_frames=args.frames,
             frame_rate=args.frame_rate,
             seed=args.seed,
-            image=legacy_image,
+            images=args.images,
         )
         # The dev one-stage pipeline uses `num_steps` (single sampler), not stage1/stage2.
         if args.stage1_steps is not None:
@@ -649,6 +742,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["cfg_scale"] = args.cfg_scale
         if args.stg_scale is not None:
             kwargs["stg_scale"] = args.stg_scale
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     elif args.distilled:
@@ -668,8 +763,6 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.verbose = not args.quiet
         if lora_paths:
             pipe._pending_loras = lora_paths
-        # distilled accepts only a single legacy `image=path` for now.
-        legacy_image = _legacy_single_image(args.images, mode_label="--distilled")
         kwargs: dict = dict(
             prompt=prompt,
             output_path=args.output,
@@ -678,12 +771,16 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             num_frames=args.frames,
             frame_rate=args.frame_rate,
             seed=args.seed,
-            image=legacy_image,
+            images=args.images,
         )
         if args.stage1_steps is not None:
             kwargs["stage1_steps"] = args.stage1_steps
         if args.stage2_steps is not None:
             kwargs["stage2_steps"] = args.stage2_steps
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
+        if getattr(args, "num_generated_keyframes", 0):
+            kwargs["generated_keyframes"] = args.num_generated_keyframes
         pipe.generate_and_save(**kwargs)
 
     elif args.two_stages_hq or args.two_stage:
@@ -738,6 +835,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["enable_teacache"] = True
             if args.teacache_thresh is not None:
                 kwargs["teacache_thresh"] = args.teacache_thresh
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     else:
@@ -957,7 +1056,15 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
     video_conditioning = [(path, float(strength)) for path, strength in args.video_conditioning]
 
     if not args.quiet:
-        print("Mode: IC-LoRA (two-stage)")
+        if args.single_stage:
+            topology = "single-stage full-res"
+        elif args.upsample_only and args.refine_steps:
+            topology = f"upsample + {args.refine_steps}-step control-aware refine (half-res gen + 2x upsample)"
+        elif args.upsample_only:
+            topology = "upsample-only (half-res gen + 2x upsample, no refine)"
+        else:
+            topology = "two-stage"
+        print(f"Mode: IC-LoRA ({topology})")
         for path, strength in lora_paths:
             print(f"  LoRA: {path} (strength={strength})")
         for path, strength in video_conditioning:
@@ -969,8 +1076,18 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         gemma_model_id=args.gemma,
         low_memory=True,
         low_ram_streaming=getattr(args, "low_ram", False),
+        dev_transformer=getattr(args, "dev_transformer", None),
+        distilled_lora=getattr(args, "distilled_lora", None),
+        distilled_lora_strength=getattr(args, "distilled_lora_strength", 0.5),
     )
     pipe.verbose = not args.quiet
+
+    if not args.quiet and pipe.dev_mode:
+        # _effective_lora_paths resolves + validates the distilled LoRA (raises
+        # early if missing) and returns it appended after the task IC-LoRA(s).
+        # A missing --dev-transformer already hard-fails in the constructor.
+        for path, strength in pipe._effective_lora_paths()[len(lora_paths) :]:
+            print(f"  Distilled LoRA (dev mode): {path} (strength={strength})")
 
     pipe.generate_and_save(
         prompt=args.prompt,
@@ -986,6 +1103,9 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         images=args.images,
         conditioning_attention_strength=args.conditioning_strength,
         skip_stage_2=args.skip_stage_2,
+        single_stage=args.single_stage,
+        upsample_only=args.upsample_only,
+        refine_steps=args.refine_steps,
     )
     _print_result(args.output, t0, args.quiet)
 

@@ -10,7 +10,101 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.19](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.18...v0.14.19) (2026-07-19)
+
+
+### Bug Fixes
+
+* explain macOS GPU-watchdog kills instead of dying cryptically ([#75](https://github.com/dgrauet/ltx-2-mlx/issues/75)) ([#78](https://github.com/dgrauet/ltx-2-mlx/issues/78)) ([8f43c23](https://github.com/dgrauet/ltx-2-mlx/commit/8f43c23e1cba9ad586afeccde07d9e851903c0cf))
+* free the DiT before VAE decode in low-memory mode ([#74](https://github.com/dgrauet/ltx-2-mlx/issues/74)) ([#76](https://github.com/dgrauet/ltx-2-mlx/issues/76)) ([89d5400](https://github.com/dgrauet/ltx-2-mlx/commit/89d54005a06c7d35d8557b46fd30c354252c8d7a))
+* stop the Gemma encoder from widening a stricter cache limit ([#79](https://github.com/dgrauet/ltx-2-mlx/issues/79)) ([#80](https://github.com/dgrauet/ltx-2-mlx/issues/80)) ([aed35d6](https://github.com/dgrauet/ltx-2-mlx/commit/aed35d63714e71a6b8ed56b54aba3b9aac207648))
+
+## [0.14.18](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.17...v0.14.18) (2026-07-11)
+
+
+### Features
+
+* warn on output dimension snapping via shared helper ([#72](https://github.com/dgrauet/ltx-2-mlx/issues/72)) ([42ea2bb](https://github.com/dgrauet/ltx-2-mlx/commit/42ea2bb6dc29e9ff974def828d95de192ef11393))
+
+
+### Documentation
+
+* document ic-lora --upsample-only / --refine-steps in CLAUDE.md ([#70](https://github.com/dgrauet/ltx-2-mlx/issues/70)) ([8e1526d](https://github.com/dgrauet/ltx-2-mlx/commit/8e1526d3147086d8981b30f1e03496012c059125))
+
+## [0.14.17](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.16...v0.14.17) (2026-07-10)
+
+
+### Features
+
+* ic-lora --upsample-only + control-aware --refine-steps ([#68](https://github.com/dgrauet/ltx-2-mlx/issues/68)) ([16580db](https://github.com/dgrauet/ltx-2-mlx/commit/16580db376888316803505d5e163048cc902ec93))
+
+
+### Documentation
+
+* document 0.14.16 features in CLAUDE.md ([#65](https://github.com/dgrauet/ltx-2-mlx/issues/65)) ([b283144](https://github.com/dgrauet/ltx-2-mlx/commit/b283144a5207c97a10b3cc8df2bb6491f7f14285))
+
+## [0.14.16](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.15...v0.14.16) (2026-07-09)
+
+
+### Features
+
+* Prompt Relay temporal prompt gating ([#61](https://github.com/dgrauet/ltx-2-mlx/issues/61)) ([b9aa475](https://github.com/dgrauet/ltx-2-mlx/commit/b9aa475ac90ebc2bbfe1dffd97ee6bdee5a823f5))
+
+
+### Bug Fixes
+
+* ic-lora dev-mode fuses distilled lora in the main pass; add --single-stage ([#63](https://github.com/dgrauet/ltx-2-mlx/issues/63)) ([dcaf982](https://github.com/dgrauet/ltx-2-mlx/commit/dcaf982be68dd2e893eca4d5851a4ab31f71ca55))
+* support quantized transformers at any group_size (not just 64) ([#60](https://github.com/dgrauet/ltx-2-mlx/issues/60)) ([9af01c8](https://github.com/dgrauet/ltx-2-mlx/commit/9af01c8fe318089abf042d33443fb815877e56d7))
+
+## [0.14.15](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.14...v0.14.15) (2026-07-01)
+
+
+### Bug Fixes
+
+* add missing frame_rate to combined_image_conditionings, fixing a2v/lipdub with image conditioning ([#56](https://github.com/dgrauet/ltx-2-mlx/issues/56)) ([cc0cacc](https://github.com/dgrauet/ltx-2-mlx/commit/cc0caccc4287855c56ba56628b5346b55f192c37))
+* do not truncate muxed video to shortest stream in VAE decode ([#58](https://github.com/dgrauet/ltx-2-mlx/issues/58)) ([d9f566a](https://github.com/dgrauet/ltx-2-mlx/commit/d9f566a641294a8562e9776ba343263771c26f70))
+
+## [0.14.14](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.13...v0.14.14) (2026-06-29)
+
+
+### Bug Fixes
+
+* apply streaming LoRA deltas under the correct block prefix ([#52](https://github.com/dgrauet/ltx-2-mlx/issues/52)) ([#53](https://github.com/dgrauet/ltx-2-mlx/issues/53)) ([b68459f](https://github.com/dgrauet/ltx-2-mlx/commit/b68459f8c284a87da18eedc518237ff16e73c47d))
+
 ## [Unreleased]
+
+## [0.14.13] - 2026-06-22
+
+Makes multi-anchor I2V reachable on the `--one-stage` and `--distilled`
+generate modes. Both pipelines already accepted the upstream-iso `images=`
+list and routed it through `combined_image_conditionings`; a leftover CLI
+guard (`_legacy_single_image`) was the only thing rejecting more than one
+`--image` anchor or a non-trivial `frame_idx`/`strength` on these modes,
+artificially restricting multi-anchor I2V to `--two-stage` / `--two-stages-hq`.
+Removing the guard brings the CLI in line with upstream, where `--image` is
+repeatable across all modes. Purely additive — only previously-erroring paths
+are affected; `--two-stage` / `--two-stages-hq` behavior is unchanged.
+Validated with start+end anchor smoke tests at 512×512×25 on both
+`--distilled` and `--one-stage`. Thanks to
+[@plz12345](https://github.com/plz12345) (#45).
+
+### Added
+
+- Multi-anchor I2V on `--one-stage` and `--distilled`: the repeatable
+  `--image PATH FRAME_IDX STRENGTH` form now works on every `generate` mode.
+  `frame_idx=0` hard-replaces the first latent frame
+  (`VideoConditionByLatentIndex`); `frame_idx>0` appends a soft keyframe anchor
+  (`VideoConditionByKeyframeIndex`). New "Multi-Anchor I2V" section in
+  `CLAUDE.md` documents the form and the `(num_frames - 1) % 8 == 0`
+  frame-count constraint.
+
+### Fixed
+
+- `VideoConditionByKeyframeIndex.frame_idx` docstring corrected from "latent
+  frame index" to "pixel frame index (0-based)", matching the math in
+  `_compute_keyframe_positions` and the `--image` help text.
+- `uv.lock` resynced to the released package versions (the 0.14.12 release
+  bumped the workspace `pyproject` files but left the lockfile at 0.14.11).
 
 ## [0.14.12] - 2026-06-15
 

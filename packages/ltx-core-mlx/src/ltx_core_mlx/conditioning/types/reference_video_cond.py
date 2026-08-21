@@ -49,7 +49,16 @@ class VideoConditionByReferenceLatent:
         ref_mask = mx.full((state.denoise_mask.shape[0], num_ref, 1), mask_value)
         new_mask = mx.concatenate([state.denoise_mask, ref_mask], axis=1)
 
-        # Extend positions with optional spatial scaling
+        # Extend positions with optional spatial scaling.
+        # ⚠️ Appending tokens without positions leaves RoPE short and the failure surfaces
+        # deep inside attention as an unrelated broadcast error, so refuse it here.
+        if state.positions is not None and self.reference_positions is None:
+            raise ValueError(
+                "VideoConditionByReferenceLatent appends reference tokens but was given no "
+                "reference_positions, while the state HAS positions. RoPE would be short by "
+                f"{num_ref} tokens and fail inside attention. Pass reference_positions "
+                "(spatially scaled by downscale_factor)."
+            )
         new_positions = state.positions
         if state.positions is not None and self.reference_positions is not None:
             ref_pos = self.reference_positions
@@ -78,4 +87,6 @@ class VideoConditionByReferenceLatent:
             denoise_mask=new_mask,
             positions=new_positions,
             attention_mask=new_attn_mask,
+            keyframes_mask=state.keyframes_mask,
+            generated_keyframe_layout=state.generated_keyframe_layout,
         )

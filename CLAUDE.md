@@ -12,6 +12,93 @@ Loads pre-converted MLX weights from the [LTX-2.3 MLX collection on HuggingFace]
 
 ---
 
+## 🔑 LTX-2.5 IS PRIMARY (2026-08-13) — branch `ltx-2.5`
+
+Default to 2.5 for new work. The port is COMPLETE: DiT deltas, Gemma-4 TE, DiffVAE, duration
+head, keyframe slots, and the DFR pipeline with temporal rounds — all gated. All seven vendor
+claims measured (`docs/claims/`, `../LTX_TESTING/LTX25-PORT-PLAN.md`).
+
+2.3 remains a working fallback and the control arm for comparisons; every 2.5 change is
+CHECKPOINT-driven (config flags, in-dir encoder detection) rather than version-switched, so
+2.3 paths are byte-identical. Do not start new feature work on 2.3.
+
+⚠️ Everything below this section that is not marked 2.5 was written for 2.3. Doctrine
+transfers; NUMBERS generally do not.
+
+### LTX-2.5 details
+
+The `ltx-2.5` branch adds **LTX-2.5** support (2026-08-11 release). Weights:
+[`mlx-community/ltx-2.5-mlx`](https://huggingface.co/mlx-community/ltx-2.5-mlx) (bf16 split
+components incl. the tuned Gemma-4 TE in-dir). Full program docs live in
+`../LTX_TESTING/LTX25-PORT-PLAN.md` + `LTX25-REFERENCE-NOTES.md` (file:line receipts against
+upstream v1.2.0); status receipts in the bridge (AB-R-0005..0007).
+
+**What differs from 2.3** (config-driven — 2.3 checkpoints are unaffected, back-compat
+strict-load verified):
+- **DiT**: `ff_bias: false` on the video stream (audio keeps bias); NEW
+  `keyframes_abs_pos_embedding` (1, 4096) applied post-patchify to `keyframes_mask`-marked
+  tokens. The target's FIRST latent frame is always marked on 2.5 (the trained embedding is
+  active — maxAbs 0.02 output effect). `LTXModel.__call__` takes `keyframes_mask`.
+- **Text encoder**: `gemma4-12b-ltx-v1` (Lightricks-tuned gemma4_unified), shipped inside the
+  model dir and loaded via mlx-lm (**requires mlx-lm with the `gemma4_unified` remap** — git
+  main as of 2026-08; release 0.31.3 lacks it). `Gemma4LanguageModel`
+  (text_encoders/gemma/encoders/gemma4_encoder.py): manual BOS (the tokenizer emits none),
+  LEFT-pad 1024, 49-state tap with the **last state post-final-norm** (HF
+  `output_hidden_states` convention — differs from the 2.3 wrapper; torch-gated).
+  `resolve_text_encoder()` picks the encoder by model dir; `blocks._PromptEncoderBlock` uses it.
+- **Sampling**: ≥ (2,5) (`scheduler.detect_model_version`) switches stage 1 to **ancestral
+  Euler** (`euler_ancestral_step`: eta 1.0, s_noise 1.0, noise seed = seed+10000, rectified
+  flow α=1−σ; conditioning re-applied AFTER renoise). Stage 2 stays plain Euler. Distilled
+  sigma tables are unchanged from 2.3.
+- **Conversion**: `scripts/convert_ltx25.py` (this repo, precedent: the pruna converter) —
+  NOT mlx-forge. Bit-gated against the 2.3 mlx-forge outputs on the byte-identical components
+  (conv VAE / audio stack / upscalers — LTX-2.5 re-ships them unchanged). ⚠️ The comfy
+  transformer files bundle the connectors, and those weights DIFFER from the diffusers
+  connectors repo — the comfy bundle is canonical (it's what ltx-pipelines loads).
+- **Parity gates**: `scripts/gate_ltx25_te.py` (tokenization identity; 49 states ≥ 0.9997;
+  pre-connector projections ≥ 0.99996) against goldens from
+  `scripts/dump_ltx25_te_golden.py` (transformers Gemma4Unified on MPS — ⚠️ meta-device
+  builds need rotary + `embed_scale` buffer seeding or every state is silently zero).
+  Reference venv: `scripts/setup_ltx25_ref_env.sh` (standalone torch-MPS env; the upstream
+  uv.lock pins CUDA-indexed torch and cannot sync on macOS).
+- **Keyframe slots / multishot (C1)**: `conditioning/types/keyframe_slots.py` —
+  `VideoGeneratedKeyframeSlots` appends tokens the model DENOISES (unlike ordinary keyframe
+  conditioning, which appends CLEAN reference tokens), one invented keyframe per position.
+  Two things are load-bearing: the RoPE span is forced to exactly `[t, t+1)` before `/fps`
+  with `causal_fix` NOT applied, and the tokens are marked in `keyframes_mask` so they get the
+  DiT's learned keyframes embedding. CLI: `generate --distilled --num-generated-keyframes N`
+  (stage 1 only, matching upstream). ⚠️ Read slots back ONE FRAME AT A TIME — a K-frame causal
+  decode blends slots that were never temporally adjacent (`types.py:271-273`).
+  ⚠️ `LatentState` gained `keyframes_mask` + `generated_keyframe_layout`; any conditioning that
+  returns a NEW state must propagate both. Dropping them does NOT raise — the slots stay in the
+  sequence and still denoise, they just become unlocatable and lose their marking, so it reads
+  as mildly worse output. `scripts/gate_ltx25_slot_conditioning.py` exists to catch that.
+- **DFR canvas layout**: `ltx_pipelines_mlx/dfr_layout.py` — segment grid, tile ranges, latent
+  stitch. Pure integer geometry, so it is gated with `==` not cosine
+  (`gate_ltx25_dfr_layout.py`: 399 segment lengths, 18 canvases, 72 tile partitions, all exact).
+- **DFR pipeline** (`ltx_pipelines_mlx/dfr.py`, `DFRPipeline.generate_dfr`): half-res base +
+  slots → spatial upsample of video AND slots → full-res detailing with slots re-appended
+  **seeded** by their upsampled stage-1 content. Costs ×1.174 time / +0.90 GB vs plain
+  distilled. Temporal rounds work (1 and 2) via the **audio-free forward**:
+  `audio_latent=None` through `LTXModel`/`X0Model` and `audio_state=None` through
+  `denoise_loop`, gating the four audio sites per block exactly as upstream's
+  `run_ax`/`run_a2v`/`run_v2a` do. ⚠️ Rounds cost **×2.767 (r=1) / ×3.542 (r=2)**, and
+  generating the identical deliverable natively at the target fps is **2.8× cheaper** —
+  rounds are a QUALITY lever, not a speed one. ⚠️ With no audio the video stream loses its
+  A2V contribution; that is upstream behaviour, not a no-op. Any edit near the block's
+  audio gating must re-run `gate_ltx25_audio_free.py`, which holds the audio-present path
+  to **bit-identical**.
+  ⚠️ `detailing_reference` defaults False (upstream gates it on an opt-in LoRA we don't host).
+  🔑 **Every new pipeline must encode the prompt and FREE Gemma BEFORE `load()`** — the 2.5 TE
+  is a bf16 12B (~24 GB) and stacking it on the 38 GB DiT nearly doubles peak. This is the
+  `1a30f74` ordering, and it was re-introduced here because the ordering lives in each
+  `generate_*` rather than a shared helper. It cost a bogus "+31 GB" C2 result.
+- **Not yet ported**: prompt enhancer
+  (needs a separate generative Gemma checkpoint we do not host), connector-block and
+  DiT-forward goldens.
+
+---
+
 ## Tech Stack
 
 - Python 3.11+, `uv` workspace (monorepo with `packages/*`)
@@ -204,6 +291,7 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 - Only `nn.Linear` inside `transformer_blocks` → int8 (group_size=64)
 - Non-quantizable (must stay bf16): `adaln_single`, `proj_out`, `patchify_proj`, connectors, VAE, vocoder
 - MLX can only quantize Linear and Embedding — never Conv layers
+- Loaders derive `(bits, group_size)` from tensor shapes → any group_size (32/64/128) + bit width (int4/int8) loads & fuses. Single home: `utils/weights.py::derive_quant_params` (exact-consistency validated); shared by load-time quant + LoRA fusion.
 
 ### Split Safetensors
 
@@ -350,7 +438,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
@@ -403,6 +491,10 @@ ltx-2-mlx ic-lora \
 ```
 
 Flags: `--lora PATH STRENGTH` (repeatable, supports HF repo IDs), `--video-conditioning PATH STRENGTH` (repeatable), `--conditioning-strength`, `--skip-stage-2`, `--image`.
+
+**Dev mode** (`--dev-transformer FILE`, opt-in — default stays distilled): fuses the distilled LoRA (`--distilled-lora`, `--distilled-lora-strength` default 0.5) **alongside** the task IC-LoRA in the same pass and keeps both across stages (Comfy Union-Control recipe). Missing `--dev-transformer` hard-fails (no silent distilled fallback). `--single-stage`: full-res one-pass (no upsampler / Stage 2), takes precedence over `--skip-stage-2`.
+
+**Cheap topologies** (0.14.17, community PR #68): `--upsample-only` = half-res gen (control applied throughout) → 2× latent upsample → decode directly, no refine — fast rough draft (~3× faster than `--single-stage`). Add `--refine-steps N` for a **control-aware refine** after the upsample: the control is re-encoded at full res and re-appended with the IC-LoRA **kept fused** (no clean-model reload), unlike the legacy Stage 2 which is control-blind. `N` maps onto the distilled sigma tail (`N=3` == `STAGE_2_SIGMAS` depth; capped at 8); each refine step is ~8× a Stage 1 step (full-res gen + appended control tokens, O(n²) attention). `--refine-steps` without `--upsample-only` is silently ignored. Both flags ignored under `--single-stage`/`--skip-stage-2`.
 
 #### Static-scene I2V recipe (preserve identity)
 
@@ -470,6 +562,48 @@ ltx-2-mlx generate \
 ```
 
 Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`.
+
+### Prompt Relay (`--segment`)
+
+Community port (WhatDreamsCost/Kijai) — sequence local prompts over time within one generation. A training-free additive Gaussian penalty on the video→text cross-attention (`attn2`) gates each local prompt's token range to a slice of the timeline; the global `--prompt` still applies to every frame.
+
+```bash
+ltx-2-mlx generate --distilled --prompt "cinematic, a woman in a bedroom" \
+  --segment "sitting on the bed" \
+  --segment "standing and turning to the window" -o out.mp4
+```
+
+Flags: `--segment "TEXT" [LEN_FRAMES]` (repeatable, timeline order; omit LEN to auto-distribute), `--relay-epsilon` (default 1e-3, smaller = sharper), `--relay-strength` (default 1.0). Works on all `generate` modes; on CFG modes the mask applies to the **conditional pass only** (never the negative). **Not compatible with modality tiling** (raises). Correctness hinges on the Gemma connector front-packing valid tokens to column *i* (`_replace_padding_with_registers`) — token *i* in encode order → column *i* in the `Nk` axis. Inert on the default path (no `--segment` → `video_cross_attention_mask=None`, byte-identical output). Key files: `conditioning/prompt_relay.py`; `video_cross_attention_mask` kwarg threaded `LTXModel → BasicAVTransformerBlock → attn2`.
+
+### Multi-Anchor I2V (`--image` repeatable)
+
+All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96).
+
+- `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
+- `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
+
+```bash
+# Anchor both ends — model animates the transition
+ltx-2-mlx generate \
+  --prompt "woman stands up from chair and walks to kitchen sink" \
+  --two-stage \
+  --image sitting.jpg 0 1.0 \
+  --image standing.jpg 96 1.0 \
+  --image at_sink.jpg 136 1.0 \
+  -f 137 --frame-rate 24 -o output.mp4
+
+# Seamless loop — same image at start and end
+ltx-2-mlx generate \
+  --prompt "flowing water rippling" \
+  --two-stage \
+  --image frame.jpg 0 1.0 \
+  --image frame.jpg 96 1.0 \
+  -f 97 --frame-rate 24 -o loop.mp4
+```
+
+**Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly. `--one-stage` works but is slower than `--two-stage` at large resolutions.
+
+**Frame count constraint:** `(num_frames - 1) % 8 == 0`. Valid counts: 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121, 129, 137, …
 
 ### Audio-to-Video Example
 
@@ -694,6 +828,7 @@ Uses the distilled model (no CFG) with LoRA fused for Stage 1 only.
 - **Stage 2 clean transformer**: After Stage 1, the LoRA-fused transformer is deleted and a fresh distilled transformer is loaded. Matches reference's separate `ModelLedger`s.
 - **Upsampler denorm/renorm**: The neural upsampler must receive denormalized latents (`vae_encoder.denormalize_latent()` before, `normalize_latent()` after). Without this, Stage 2 produces garbage.
 - **Reference resolution**: Must be 32-aligned for VAE encoder. Computed via `compute_video_latent_shape(num_frames, h // scale, w // scale)` then `* 32`.
+- **Half-res dims floored to mult-32** (0.14.17): `gen_h = (height//2//32)*32` — raw `height//2` crashed the VAE encoder's `space_to_depth` for non-mult-64 targets with `--image` (incl. default 480). Latent-neutral; output snaps down at non-mult-64 dims (requested 480 high → 448 out).
 - **Stage 2 positions**: Derived from actual upscaled dims (`H_half * 2`, `W_half * 2`), not target `height/width` (which may round differently).
 - **Motion Track BGR**: Control videos use BGR channel order (matches IC-LoRA training format).
 - **LoRA key remapping**: Uses `LTXV_LORA_COMFY_RENAMING_MAP` (ComfyUI/diffusers → MLX keys). All 480 LoRA targets match model keys.
@@ -935,26 +1070,45 @@ and applies to every consumer of the package.
 | Default value change (potentially breaking for callers relying on defaults) | `y` | `0.11.1 → 0.12.0` (TilingConfig / rope defaults) |
 | Removal / signature change | `y` | `0.9.x → 0.10.0` (ImageToVideoPipeline removal) |
 
-### Release artifacts
+### Release artifacts (automated via release-please)
 
-Every release on `main` produces, in this order:
+Releases are driven by **release-please** (`.github/workflows/release-please.yml`),
+mirroring the setup in mlx-forge and smeltr. You no longer hand-bump versions or
+hand-cut tags — you just merge conventional-commit feature PRs into `main`.
 
-1. **Merged squash commit** with conventional-commits subject + body.
-2. **Annotated git tag** `vX.Y.Z` on the merge commit (created locally
-   with `git tag -a vX.Y.Z -m '...'`, pushed via `git push origin vX.Y.Z`).
-3. **GitHub Release** auto-created by `.github/workflows/release.yml` (it
-   listens on `v*` tags). After creation, edit the release notes to use
-   the corresponding `CHANGELOG.md` section verbatim via
-   `gh release edit vX.Y.Z --notes-file …`.
-4. **CHANGELOG entry** at the top of the file under
-   `## [X.Y.Z] - YYYY-MM-DD` with `### Added` / `### Changed` /
-   `### Fixed` / `### Removed` sections as needed. Plain prose first
-   paragraph explaining the why; details below.
-5. **`pyproject.toml` version bump** in the workspace root **and** in
-   every sub-package (`packages/ltx-core-mlx/`, `packages/ltx-pipelines-mlx/`,
-   `packages/ltx-trainer/`) — all four must stay in sync.
-6. **`.release-please-manifest.json` bump** so release-please can drive
-   future automated releases from the correct base.
+The flow:
+
+1. **Merge feature PRs** into `main` with conventional-commit subjects
+   (`feat:` → `z` bump, `fix:` → `z` bump, `feat!:`/`fix!:` → `y` bump). The
+   bump rules in the table above still hold; release-please derives them from
+   the commit type. `commitlint` enforces the prefixes.
+2. **release-please opens / updates a `chore(main): release X.Y.Z` PR**
+   automatically on every push to `main`. It aggregates the unreleased commits
+   into the `CHANGELOG.md` entry and bumps the version in all four pyprojects:
+   the workspace root via the `python` release-type, and the three
+   sub-packages (`ltx-core-mlx`, `ltx-pipelines-mlx`, `ltx-trainer`) via the
+   `extra-files` TOML `$.project.version` entries in `release-please-config.json`.
+   All four stay in sync by construction.
+3. **`relock-on-release.yml` resyncs `uv.lock`** on that release PR
+   (gated to the Bot-authored `release-please--` branch), so the lockfile
+   always matches the released version — this is what the 0.14.12 release
+   missed by hand.
+4. **Merging the release PR** makes release-please push the annotated
+   `vX.Y.Z` tag on the merge commit **and** create the GitHub Release with the
+   CHANGELOG section as notes. No manual `git tag` / `gh release` step.
+
+The release PR is authored by the release GitHub App (`RELEASE_APP_ID` /
+`RELEASE_APP_PRIVATE_KEY` secrets), not the default `GITHUB_TOKEN`, so its PR
+triggers CI and the relock workflow (a default-token push cannot trigger other
+workflows). `.release-please-manifest.json` tracks the last released version;
+do not edit it by hand.
+
+**Manual fallback** (only if release-please is broken): bump the four pyprojects
++ `uv.lock` + manifest, add the CHANGELOG entry, open a `chore(release):` PR,
+then tag with `git tag -a vX.Y.Z` and `git push origin vX.Y.Z`
+(`.github/workflows/release.yml` no longer exists — the tag-listening release
+job was superseded by release-please). `scripts/validate_versions.py` checks
+four-pyproject coherence for this path.
 
 ### Pre-releases (release candidates)
 
