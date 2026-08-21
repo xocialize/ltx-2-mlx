@@ -1,119 +1,105 @@
 # ltx-2-mlx
 
-Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon. Three-package monorepo mirroring the reference structure — inference, pipelines, and training — running natively on Metal.
+Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon — a joint
+**audio + video** diffusion transformer, running natively on Metal. Three-package monorepo
+mirroring the reference structure: inference, pipelines, and training.
 
-## Features
+> **LTX-2.5 is the primary line.** The port is complete and parity-gated against the PyTorch
+> reference. [LTX-2.3](docs/LTX-2.3.md) remains fully supported as the fallback and comparison arm.
 
-- **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
-- **Image-to-Video** — animate a reference image
-- **Audio-to-Video** — generate video conditioned on an audio track
-- **Retake / Extend** — edit existing videos (regenerate segments, add frames)
-- **Keyframe interpolation** — smooth transition between reference images
-- **IC-LoRA** — reference video conditioning (depth/pose/edges)
-- **HDR IC-LoRA** — LogC3-compressed HDR generation (V2V upgrade or pure T2V) producing linear HDR `.npz` + SDR mp4 preview
-- **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
-- **Two-stage generation** — half-res → neural upscale → refine
-- **HQ generation** — res_2s second-order sampler + CFG/STG guidance
-- **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text cross-attention. Works across all generate modes; on CFG modes the mask applies to the conditional pass only.
-- **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
-- **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers generate / `--two-stage` / `--two-stages-hq` / a2v / keyframe / ic-lora; bind-time LoRA fusion supports custom distilled-lora-strength)
-- **Modality tiling (`--tile-frames N --tile-spatial M`)** — split video tokens into spatial+temporal tiles to cap O(N²) attention activations. Combined with `--low-ram`, unblocks long / HD / 4K generations on Mac Studio (64-128 GB) that would otherwise OOM.
-- **3 model variants** — bf16, int8, int4 (fits 16GB–64GB Macs)
-- **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
+## What 2.5 adds over 2.3
 
-> **Production readiness**: pipelines are classified as Stable / Beta /
-> Experimental. See [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md)
-> before relying on a pipeline in production code. CLI subcommands flagged
-> `[beta]` or `[experimental]` in `--help` may have known quality
-> limitations or pre-1.0 LoRA dependencies.
+| | |
+|---|---|
+| **Gemma-4 text encoder** | `gemma4-12b-ltx-v1`, shipped **inside** the model tree. 49-state tap, parity-gated to mean cosine 0.999985. |
+| **Generated keyframe slots** | Multi-shot generation in a single pass (`--num-generated-keyframes`). |
+| **DFR pipeline** | Detail-First Rendering: half-res stage 1 → spatial upsample → stage-2 detailing, with optional temporal rounds. |
+| **Diffusion VAE decoder** | A second decoder for the same latent, one x0 step from a noise canvas. |
+| **Duration head** | Predicts shot duration in log-seconds, snapped to the causal frame grid. |
+| **Ancestral stage-1 sampler** | η-scaled renoise on the first stage. |
+
+## Measured, including what did not survive
+
+Every vendor claim was measured rather than assumed. Reports and raw JSON live in
+[`docs/claims/`](docs/claims/).
+
+| Claim | Verdict |
+|---|---|
+| Multi-shot in one pass | ✅ **free** — no measurable cost over a single shot |
+| Prompt enhancement | ✅ works; costs a **separate ~7 GB generative model** (the unified checkpoint is encode-only) |
+| Duration head | ⚠️ **partial** — responds to pacing, not to explicit durations |
+| DFR temporal rounds | ❌ **cost more, not less** — ×1.68 (r=1) / ×1.76 (r=2) vs native at matched output |
+| Diffusion VAE decoder | ❌ **~10–12× slower, +24 GB, and less faithful** than the conv decoder |
+
+The two ❌ rows are shipped and working — they are simply not worth using at these numbers, and we
+would rather say so than let a feature list imply otherwise.
+
+## Upstream gaps we work around
+
+This port depends only on **released** packages — `uv sync` from a clean clone is enough. Two
+upstream gaps are handled here rather than by pinning unreleased dependencies, and both are worth
+knowing about if you read the code:
+
+**`gemma4_unified` is not a model type released mlx-lm knows.** LTX-2.5's text encoder declares
+`model_type: gemma4_unified`; mlx-lm registers the architecture as `gemma4`. Upstream added a
+`MODEL_REMAPPING` entry for this, but it is not in any release (absent from v0.31.2 and v0.31.3,
+present only on `main`). Rather than require a git dependency, `Gemma4LanguageModel.load` supplies
+the mapping itself via `model_config={"model_type": "gemma4"}`. Remove it once a release carries the
+mapping — nothing else depends on it.
+
+**mlx-lm must be ≥ 0.31.2.** That is where `gemma4.py` first ships. On 0.31.0/0.31.1 the encoder
+cannot load at all, so the floor is a hard requirement rather than a preference.
 
 ## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
+- macOS on Apple Silicon
 - Python 3.11+
-- 32GB+ RAM recommended (int8) or 16GB+ with `--low-ram`. 16GB minimum (int4 without streaming)
-- ffmpeg (for video encoding)
+- **ffmpeg** (video encoding)
+- RAM: see *Weights* below. Weight streaming lowers the floor substantially.
 
 ## Installation
 
 ```bash
-git clone https://github.com/dgrauet/ltx-2-mlx.git
+git clone https://github.com/xocialize/ltx-2-mlx.git
 cd ltx-2-mlx
 uv sync --all-extras
 ```
 
+## Weights
+
+LTX-2.5, published to `mlx-community`:
+
+| Component | HuggingFace | Size |
+|---|---|---|
+| Base (bf16 DiT + encoder + VAEs + vocoder) | [`mlx-community/ltx-2.5-mlx`](https://huggingface.co/mlx-community/ltx-2.5-mlx) | ~100 GB |
+| int8 DiT | [`mlx-community/ltx-2.5-mlx-ditq8`](https://huggingface.co/mlx-community/ltx-2.5-mlx-ditq8) | ~21 GB |
+| int8 text encoder | [`mlx-community/ltx-2.5-mlx-q8`](https://huggingface.co/mlx-community/ltx-2.5-mlx-q8) | ~24 GB |
+| Granules (weight streaming) | [`xocialize/ltx-2.5-granules`](https://huggingface.co/xocialize/ltx-2.5-granules) | ~59 GB |
+
+⚠️ **The quantized DiT is `-ditq8`, not `-q8`.** On 2.5, `-q8` is the int8 **text encoder** — a
+different axis. They can be mixed freely.
+
+For 2.3 weights see [docs/LTX-2.3.md](docs/LTX-2.3.md).
+
 ## Quick Start
 
-### CLI
-
 ```bash
-# Text-to-Video — pick a pipeline mode (one of `--two-stage`, `--two-stages-hq`, `--one-stage`, `--distilled`).
-# Two-stage is the upstream-recommended production default.
-ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -o sunset.mp4
+# Text-to-video with audio, LTX-2.5
+ltx-2-mlx generate -p "a fox running down a beach at sunset, waves rolling in" \
+  -m mlx-community/ltx-2.5-mlx --distilled \
+  -W 704 -H 512 -f 121 --frame-rate 24 -o out.mp4
 
-# Image-to-Video (any mode supports --image)
-ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -o animated.mp4
+# Image-to-video — any mode accepts --image
+ltx-2-mlx generate -p "the camera pushes in slowly" --image photo.jpg \
+  -m mlx-community/ltx-2.5-mlx --distilled -W 704 -H 512 -f 121 --frame-rate 24 -o out.mp4
 
-# HQ (res_2s sampler, highest quality)
-ltx-2-mlx generate --prompt "A scene" --two-stages-hq --stage1-steps 20 -o hq.mp4
-
-# Distilled two-stage (fastest, mirrors upstream DistilledPipeline)
-ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -o distilled.mp4
-
-# One-stage dev + CFG (full target res, mirrors upstream TI2VidOneStagePipeline)
-ltx-2-mlx generate --prompt "A scene" --one-stage -o one_stage.mp4
-
-# Audio-to-Video
-ltx-2-mlx a2v --prompt "Music video" --audio music.wav -o a2v.mp4
-
-# Retake (regenerate frames 1-3 of a video)
-ltx-2-mlx retake --prompt "New action" --video source.mp4 --start 1 --end 3 -o retake.mp4
-
-# Extend (add 2 latent frames after)
-ltx-2-mlx extend --prompt "Continue the scene" --video source.mp4 --extend-frames 2 -o extended.mp4
-
-# Keyframe interpolation
-ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.png -o transition.mp4
-
-# Prompt enhancement
-ltx-2-mlx enhance --prompt "a cat" --mode t2v
-
-# Use int4 model (fits 16GB)
-ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
-
-# Block streaming: bf16 model on 32 GB Mac
-ltx-2-mlx generate -p "A cat" --two-stage -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
-
-# Block streaming: q8 model on 16 GB Mac
-ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
-
-# Block streaming works on every generate mode + a2v / keyframe / ic-lora
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stage --low-ram
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stages-hq --low-ram
-ltx-2-mlx a2v -p "music video" --audio music.wav -o a2v.mp4 --low-ram
-ltx-2-mlx keyframe -p "transition" --start a.png --end b.png -o kf.mp4 --low-ram
-ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --low-ram -o out.mp4
-
-# HDR IC-LoRA — V2V upgrade an SDR video to linear HDR (saves out.mp4 + out.hdr.npz)
-ltx-2-mlx hdr-ic-lora -p "cinematic golden hour" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-    --video-conditioning source_sdr.mp4 1.0 --low-ram -o out.mp4
-
-# HDR IC-LoRA — pure T2V (no conditioning video)
-ltx-2-mlx hdr-ic-lora -p "a sunset over the ocean, vivid HDR" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 --low-ram -o out.mp4
-
-# Modality tiling: split video tokens for long/HD scenarios that exceed attention memory.
-# Stack with --low-ram for max memory savings on big targets.
-ltx-2-mlx generate -p "long scene" --two-stage --low-ram \
-    --tile-frames 2 --tile-overlap 4 -o long.mp4
-ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram \
-    --tile-spatial 2 --tile-overlap 4 -H 1080 -W 1920 -o hd.mp4
-
-# Model info
-ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
+# int8 DiT — same components, quantized transformer
+ltx-2-mlx generate -p "a fox in snow" -m mlx-community/ltx-2.5-mlx \
+  --dit mlx-community/ltx-2.5-mlx-ditq8 --distilled \
+  -W 704 -H 512 -f 121 --frame-rate 24 -o out.mp4
 ```
+
+Frame counts follow an **8k+1** grid (9, 121, 161, 241 …); values in between are snapped.
 
 ### Python API
 
@@ -291,16 +277,6 @@ The number of frames must be `8k + 1` (due to VAE temporal compression 8x). Comm
 
 Higher frame counts require more RAM. With int4 on 32GB, 97 frames at 512x320 is comfortable. Reduce resolution for longer videos.
 
-## Pre-converted Weights
-
-| Variant | HuggingFace | Size | RAM |
-|---------|-------------|------|-----|
-| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42 GB | 64 GB+ |
-| int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~21 GB | 32 GB+ |
-| int4 | [dgrauet/ltx-2.3-mlx-q4](https://huggingface.co/dgrauet/ltx-2.3-mlx-q4) | ~12 GB | 16 GB+ |
-
-Weights are pre-converted to MLX format by [mlx-forge](https://github.com/dgrauet/mlx-forge).
-
 ## Packages
 
 | Package | Description |
@@ -313,9 +289,15 @@ Weights are pre-converted to MLX format by [mlx-forge](https://github.com/dgraue
 
 - [LTX-2](https://github.com/Lightricks/LTX-2) — Lightricks reference (ltx-core + ltx-pipelines + ltx-trainer)
 - [mlx-forge](https://github.com/dgrauet/mlx-forge) — weight conversion tool
-- [Pre-converted weights](https://huggingface.co/collections/dgrauet/ltx-23) — HuggingFace collection
+- [LTX-2.5 weights](https://huggingface.co/mlx-community/ltx-2.5-mlx) · [LTX-2.3](docs/LTX-2.3.md)
 - [MLX](https://github.com/ml-explore/mlx) — Apple Silicon ML framework
 
 ## License
 
-MIT
+**Two layers, and they differ.**
+
+- **This port** — MIT (see `LICENSE`; copyright retained from the upstream
+  [dgrauet/ltx-2-mlx](https://github.com/dgrauet/ltx-2-mlx) it is forked from).
+- **The model weights** — [LTX-2 Community License](https://huggingface.co/Lightricks/LTX-2),
+  which carries its own terms including a revenue gate and non-compete. Using or redistributing
+  the weights binds you to them regardless of this repository's licence.

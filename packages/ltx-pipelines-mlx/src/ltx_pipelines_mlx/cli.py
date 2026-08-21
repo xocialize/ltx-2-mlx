@@ -126,7 +126,7 @@ def main() -> None:
     """Entry point for the ltx-2-mlx CLI."""
     parser = argparse.ArgumentParser(
         prog="ltx-2-mlx",
-        description="LTX-2.3 video generation on Apple Silicon (MLX)",
+        description="LTX-2 video generation on Apple Silicon (MLX) — LTX-2.5 and LTX-2.3",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
