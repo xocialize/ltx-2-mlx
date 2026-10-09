@@ -25,11 +25,12 @@ classifiers = [
 dependencies = [
     "mlx>=0.31.0",
     "mlx-arsenal>=0.2.4",
-    # ⚠️ 0.31.2 is a HARD floor, not a preference: LTX-2.5's text encoder is a
-    # `gemma4_unified` checkpoint loaded through `mlx_lm.load`, and gemma4 first
-    # shipped in mlx-lm v0.31.2. On 0.31.0/0.31.1 the model type is simply
-    # unknown and 2.5 fails at load with "Model type gemma4_unified not supported".
-    "mlx-lm>=0.31.2",
+    # ⚠️ 0.32.0 is a HARD floor, not a preference: LTX-2.5's text encoder is a
+    # `gemma4_unified` checkpoint loaded through `mlx_lm.load`, and the
+    # `gemma4_unified -> gemma4` remap only landed in mlx-lm v0.32.0. On 0.31.x
+    # the model type is unknown and 2.5 fails at load with
+    # "Model type gemma4_unified not supported".
+    "mlx-lm>=0.32.0",
     "safetensors>=0.4.0",
     "huggingface-hub>=0.26.0",
     "numpy>=1.26.0",
